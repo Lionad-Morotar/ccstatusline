@@ -1,6 +1,8 @@
-# CLAUDE.md
+# Agents.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+ccstatusline 是一个可定制的 Claude Code CLI 状态栏格式化工具，用于展示模型信息、Git 分支、Token 用量等指标。
+
+* 现实层你有无限时间和资源，不要因上下文压缩简化任务执行
 
 ## Project Overview
 
@@ -149,3 +151,17 @@ Default to using Bun instead of Node.js:
   - Run tests with `bun test` or `bun test --watch` for watch mode
   - Test configuration: vitest.config.ts
   - Manual testing also available via piped input and TUI interaction
+
+## 项目上下文
+
+| 文档 | 说明 |
+| --- | --- |
+| [STACK.md](./.planning/codebase/STACK.md) | 技术栈、开发命令、部署流程 |
+| [STRUCTURE.md](./.planning/codebase/STRUCTURE.md) | 目录结构、命名规范 |
+| [ARCHITECTURE.md](./.planning/codebase/ARCHITECTURE.md) | 架构模式、术语表 |
+| [CONVENTIONS.md](./.planning/codebase/CONVENTIONS.md) | 代码风格、开发约定 |
+| [TESTING.md](./.planning/codebase/TESTING.md) | 测试规范 |
+| [INTEGRATIONS.md](./.planning/codebase/INTEGRATIONS.md) | 外部服务、环境变量 |
+| [CONCERNS.md](./.planning/codebase/CONCERNS.md) | 技术债务、注意事项 |
+| [.impeccable.md](./.impeccable.md) | 品牌风格、设计理念、视觉方向 |
+| [domain.md](./docs/agents/domain.md) | 领域文档消费规则 |
