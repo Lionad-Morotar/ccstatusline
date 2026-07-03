@@ -95,6 +95,7 @@ export const WIDGET_MANIFEST: WidgetManifestEntry[] = [
     { type: 'vim-mode', create: () => new widgets.VimModeWidget() },
     { type: 'voice-status', create: () => new widgets.VoiceStatusWidget() },
     { type: 'remote-control-status', create: () => new widgets.RemoteControlStatusWidget() },
+    { type: 'claude-startup-command', create: () => new widgets.ClaudeStartupCommandWidget() },
     { type: 'worktree-mode', create: () => new widgets.GitWorktreeModeWidget() },
     { type: 'worktree-name', create: () => new widgets.GitWorktreeNameWidget() },
     { type: 'worktree-branch', create: () => new widgets.GitWorktreeBranchWidget() },
