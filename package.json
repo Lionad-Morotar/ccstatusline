@@ -1,6 +1,6 @@
 {
   "name": "@lionad/ccstatusline",
-  "version": "2.2.30",
+  "version": "2.2.30-lionad.0",
   "bugs": {
     "url": "https://github.com/sirmalloc/ccstatusline/issues"
   },
@@ -30,11 +30,17 @@
     "video:still": "remotion still remotion/index.ts ccstatusline-tui-demo out/ccstatusline-tui-demo.png --frame=700 --scale=0.5",
     "video:render": "remotion render remotion/index.ts ccstatusline-tui-demo out/ccstatusline-tui-demo.mp4",
     "video:gif": "bun run video:render && ffmpeg -y -i out/ccstatusline-tui-demo.mp4 -filter_complex \"fps=12,scale=1322:-1:flags=lanczos,split[s0][s1];[s0]palettegen=max_colors=256[p];[s1][p]paletteuse=dither=none:diff_mode=rectangle\" out/ccstatusline-tui-demo-unoptimized.gif && gifsicle -O3 --lossy=30 out/ccstatusline-tui-demo-unoptimized.gif -o out/ccstatusline-tui-demo.gif",
-    "prepublishOnly": "bun run build",
+    "prepublishOnly": "rm -rf dist/* && bun build src/ccstatusline.ts --target=node --splitting --format=esm --outdir=dist --target-version=14 && bun run scripts/replace-version.ts",
+    "prebuild": "bun test",
+    "prerelease": "pnpm run build",
+    "release": "pnpm publish --config.registry=https://registry.npmjs.org --tag lionad --access public --no-git-checks",
     "lint": "bun tsc --noEmit && eslint . --config eslint.config.js --max-warnings=0",
     "lint:fix": "bun tsc --noEmit && eslint . --config eslint.config.js --max-warnings=0 --fix",
     "docs": "typedoc",
     "docs:clean": "rm -rf typedoc"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
@@ -77,11 +83,11 @@
     "status-line",
     "terminal"
   ],
-  "author": "",
+  "author": "Lionad",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/sirmalloc/ccstatusline.git"
+    "url": "git+https://github.com/Lionad-Morotar/ccstatusline.git"
   },
   "engines": {
     "node": ">=14.0.0"
