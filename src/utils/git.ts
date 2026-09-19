@@ -307,6 +307,13 @@ export function runGitArgs(args: string[], context: RenderContext, cacheCommand?
     const ttlMs = getGitCacheTtlMs(context);
     const now = Date.now();
 
+    // 真实目录但向上找不到 .git 时 git 必然失败（git 自身的查找逻辑与 discoverGitDir 等价），
+    // 短路返回可避免状态栏高频刷新时反复 fork 注定失败的子进程。
+    // 路径不存在或 cwd 缺失时保留原 exec 行为：git 会在进程自身 cwd 下执行，仍可能命中仓库。
+    if (cwd && !metadata && normalizeDirectory(cwd)) {
+        return null;
+    }
+
     // Check cache first
     const memoryEntry = gitCommandCache.get(memoryCacheKey);
     if (memoryEntry && isCacheEntryFresh(memoryEntry, metadata, ttlMs, now)) {

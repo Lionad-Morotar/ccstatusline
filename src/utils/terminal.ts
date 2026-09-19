@@ -1,6 +1,7 @@
 import { execSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as tty from 'tty';
 
 // Get package version
 // __PACKAGE_VERSION__ will be replaced at build time
@@ -32,6 +33,30 @@ export function getPackageVersion(): string {
     return '';
 }
 
+function getWidthFromControllingTty(): number | null {
+    // 经控制终端直接读宽度：一次 open + TIOCGWINSZ（tty.WriteStream 构造时），零 fork。
+    // 即使 stdio 全是 pipe，只要进程未脱离会话（setsid/daemon），控制终端就在；
+    // 完全无 TTY 的 spawn 路径下 open 会失败，交由调用方回退到祖先遍历。
+    let fd: number | null = null;
+    try {
+        fd = fs.openSync('/dev/tty', 'r');
+        const stream = new tty.WriteStream(fd);
+        const columns = stream.columns;
+        stream.destroy();
+        fd = null; // WriteStream 已接管并随 destroy 关闭
+        return typeof columns === 'number' && columns > 0 ? columns : null;
+    } catch {
+        if (fd !== null) {
+            try {
+                fs.closeSync(fd);
+            } catch {
+                // 清理失败不影响探测结果
+            }
+        }
+        return null;
+    }
+}
+
 function probeTerminalWidth(): number | null {
     // Explicit override. Useful when ccstatusline is spawned in a context where
     // no ancestor process owns a TTY at all — e.g. some Claude Code >= 2.1.139
@@ -51,6 +76,13 @@ function probeTerminalWidth(): number | null {
     // This avoids Unix fallback command behavior (e.g. 2>/dev/null) on Windows.
     if (process.platform === 'win32') {
         return null;
+    }
+
+    // 快路径：状态栏在 Claude Code 下 stdio 被 pipe，但控制终端通常仍在，
+    // 直接读取可避免每层祖先 3 次 ps/stty fork。
+    const controllingTtyWidth = getWidthFromControllingTty();
+    if (controllingTtyWidth !== null) {
+        return controllingTtyWidth;
     }
 
     // Claude Code can spawn ccstatusline with piped stdio, leaving the immediate

@@ -1,5 +1,7 @@
 import { execSync } from 'child_process';
+import fs from 'fs';
 import os from 'os';
+import path from 'path';
 
 import type { RenderContext } from '../types/RenderContext';
 import type { Settings } from '../types/Settings';
@@ -8,6 +10,40 @@ import type {
     WidgetEditorDisplay,
     WidgetItem
 } from '../types/Widget';
+
+// 状态栏刷新频率远高于内存数据的参考变化速度：2s 跨进程缓存让高频刷新
+// 免于每次 fork 一个 vm_stat 子进程。多会话并发写靠 temp+rename 保证原子性。
+const MEM_CACHE_TTL_MS = 2000;
+
+function getMemCachePath(): string {
+    const cacheDir = process.env.CCSTATUSLINE_CACHE_DIR ?? path.join(os.homedir(), '.cache', 'ccstatusline');
+    return path.join(cacheDir, 'mem-cache.json');
+}
+
+function readMemCache(): number | null {
+    try {
+        const raw = fs.readFileSync(getMemCachePath(), 'utf8');
+        const entry = JSON.parse(raw) as { usedBytes?: unknown; createdAt?: unknown };
+        if (typeof entry.usedBytes !== 'number' || typeof entry.createdAt !== 'number')
+            return null;
+
+        return Date.now() - entry.createdAt < MEM_CACHE_TTL_MS ? entry.usedBytes : null;
+    } catch {
+        return null;
+    }
+}
+
+function writeMemCache(usedBytes: number): void {
+    try {
+        const cachePath = getMemCachePath();
+        fs.mkdirSync(path.dirname(cachePath), { recursive: true });
+        const tempPath = `${cachePath}.${process.pid}.${Date.now()}.tmp`;
+        fs.writeFileSync(tempPath, JSON.stringify({ usedBytes, createdAt: Date.now() }), 'utf8');
+        fs.renameSync(tempPath, cachePath);
+    } catch {
+        // Best-effort cache; rendering must never fail because of it.
+    }
+}
 
 function formatBytes(bytes: number): string {
     const GB = 1024 ** 3;
@@ -25,6 +61,10 @@ function formatBytes(bytes: number): string {
 
 // Get memory usage like htop does on macOS (Active + Wired)
 function getUsedMemoryMacOS(): number | null {
+    const cached = readMemCache();
+    if (cached !== null)
+        return cached;
+
     try {
         const output = execSync('vm_stat', { encoding: 'utf8', windowsHide: true });
         const lines = output.split('\n');
@@ -55,7 +95,9 @@ function getUsedMemoryMacOS(): number | null {
                 wiredPages = parseInt(wiredValue, 10);
         }
 
-        return (activePages + wiredPages) * pageSize;
+        const usedBytes = (activePages + wiredPages) * pageSize;
+        writeMemCache(usedBytes);
+        return usedBytes;
     } catch {
         return null;
     }

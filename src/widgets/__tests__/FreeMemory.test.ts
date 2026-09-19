@@ -1,5 +1,7 @@
 import * as childProcess from 'child_process';
+import * as fs from 'fs';
 import os from 'os';
+import path from 'path';
 import {
     afterEach,
     beforeEach,
@@ -25,6 +27,8 @@ describe('FreeMemoryWidget', () => {
         mockImplementation: (fn: () => never) => void;
         mockReturnValue: (value: string) => void;
     };
+    let tempCacheDir: string;
+    let savedCacheDirEnv: string | undefined;
 
     beforeEach(() => {
         vi.restoreAllMocks();
@@ -32,10 +36,21 @@ describe('FreeMemoryWidget', () => {
         mockFreemem = vi.spyOn(os, 'freemem');
         mockPlatform = vi.spyOn(os, 'platform');
         mockExecSync = vi.spyOn(childProcess, 'execSync');
+
+        // vm_stat 结果有跨进程缓存，指向独立临时目录避免测试间互相污染
+        savedCacheDirEnv = process.env.CCSTATUSLINE_CACHE_DIR;
+        tempCacheDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ccstatusline-test-'));
+        process.env.CCSTATUSLINE_CACHE_DIR = tempCacheDir;
     });
 
     afterEach(() => {
         vi.restoreAllMocks();
+        if (savedCacheDirEnv === undefined) {
+            delete process.env.CCSTATUSLINE_CACHE_DIR;
+        } else {
+            process.env.CCSTATUSLINE_CACHE_DIR = savedCacheDirEnv;
+        }
+        fs.rmSync(tempCacheDir, { recursive: true, force: true });
     });
 
     describe('metadata', () => {
