@@ -16,12 +16,24 @@ export interface RenderUsageData {
     weeklySonnetResetAt?: string;
     weeklyOpusUsage?: number;
     weeklyOpusResetAt?: string;
+    fableUsage?: number;
+    fableResetAt?: string;
     extraUsageEnabled?: boolean;
     extraUsageLimit?: number;
     extraUsageUsed?: number;
     extraUsageUtilization?: number;
     extraUsageCurrency?: string;
     error?: 'no-credentials' | 'timeout' | 'rate-limited' | 'api-error' | 'parse-error';
+}
+
+export interface ClaudeStatusRenderData {
+    indicator?: string;
+    incidents?: {
+        impact: 'minor' | 'major' | 'critical';
+        startMs: number;
+        endMs: number | null;
+    }[];
+    error?: boolean;
 }
 
 export interface CompactionData {
@@ -36,7 +48,10 @@ export interface RenderContext {
     speedMetrics?: SpeedMetrics | null;
     windowedSpeedMetrics?: Record<string, SpeedMetrics> | null;
     usageData?: RenderUsageData | null;
+    claudeStatusData?: ClaudeStatusRenderData | null;
     sessionDuration?: string | null;
+    transcriptSessionName?: string | null;
+    transcriptThinkingEffort?: { value: string; known: boolean } | null;
     blockMetrics?: BlockMetrics | null;
     skillsMetrics?: SkillsMetrics | null;
     compactionData?: CompactionData | null;
@@ -44,6 +59,8 @@ export interface RenderContext {
     isPreview?: boolean;
     minimalist?: boolean;
     gitCacheTtlSeconds?: number;
+    customCommandCacheTtlSeconds?: number;
+    gitReviewNeedsChecks?: boolean;
     lineIndex?: number;  // Index of the current line being rendered (for theme cycling)
     globalSeparatorIndex?: number;  // Global separator index that continues across lines
 

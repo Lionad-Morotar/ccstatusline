@@ -34,12 +34,16 @@ import {
 } from '../utils/claude-settings';
 import { cloneSettings } from '../utils/clone-settings';
 import {
+    applyImport,
+    exportConfig,
     getConfigLoadError,
     getConfigPath,
     isCustomConfigPath,
     loadSettings,
     saveInstallationMetadata,
-    saveSettings
+    saveSettings,
+    validateImportFile,
+    type ImportValidationResult
 } from '../utils/config';
 import {
     inspectGlobalCommandResolution,
@@ -73,7 +77,10 @@ import { loadClaudeStatusLineState } from './claude-status';
 import {
     ColorMenu,
     ConfirmDialog,
+    ExportConfigDialog,
     GlobalOverridesMenu,
+    ImportConfigDialog,
+    ImportPreviewDialog,
     InstallMenu,
     ItemsEditor,
     LineSelector,
@@ -119,7 +126,10 @@ type AppScreen = 'main'
     | 'manageInstallation'
     | 'uninstallOptions'
     | 'updates'
-    | 'refreshInterval';
+    | 'refreshInterval'
+    | 'exportConfig'
+    | 'importConfig'
+    | 'importPreview';
 
 type PinnedVersionMismatchAction = 'update' | 'exit';
 
@@ -295,7 +305,6 @@ function clearInstallationMetadata(settings: Settings | null): Settings | null {
     }
 
     const { installation, ...next } = settings;
-    void installation;
     return next;
 }
 
@@ -403,6 +412,17 @@ export function getConfirmCancelScreen(confirmDialog: ConfirmDialogState | null)
     return confirmDialog?.cancelScreen ?? 'main';
 }
 
+export function applyTuiImport(
+    current: Settings,
+    imported: Settings,
+    mode: 'replace' | 'merge',
+    presentKeys: readonly (keyof Settings)[]
+): Settings {
+    const nextSettings = applyImport(current, imported, mode, presentKeys);
+    chalk.level = nextSettings.colorLevel;
+    return nextSettings;
+}
+
 export function clearInstallMenuSelection(menuSelections: Record<string, number>): Record<string, number> {
     if (menuSelections.install === undefined && menuSelections.installPackage === undefined) {
         return menuSelections;
@@ -467,6 +487,7 @@ export const App: React.FC = () => {
     const [updatesReturnScreen, setUpdatesReturnScreen] = useState<'main' | 'manageInstallation'>('main');
     const [hasLoadedClaudeStatus, setHasLoadedClaudeStatus] = useState(false);
     const [hasLoadedInstalledState, setHasLoadedInstalledState] = useState(false);
+    const [importValidation, setImportValidation] = useState<ImportValidationResult | null>(null);
 
     useEffect(() => {
         void loadClaudeStatusLineState()
@@ -761,6 +782,59 @@ export const App: React.FC = () => {
         setScreen('confirm');
     }, [getGlobalResolutionWarning]);
 
+    const handleExportConfig = useCallback(async (filePath: string) => {
+        try {
+            if (!settings) {
+                return;
+            }
+            await exportConfig(settings, filePath);
+            setFlashMessage({ text: `Config exported to ${filePath}`, color: 'green' });
+        } catch (err) {
+            setFlowNotice({
+                title: 'Export Failed',
+                message: err instanceof Error ? err.message : String(err),
+                color: 'red',
+                continueScreen: 'main'
+            });
+            setScreen('flowNotice');
+            return;
+        }
+        setScreen('main');
+    }, [settings]);
+
+    const handleImportFileChosen = useCallback(async (filePath: string) => {
+        const result = await validateImportFile(filePath);
+        if (result.status === 'invalid') {
+            setFlowNotice({
+                title: 'Import Failed',
+                message: result.reason,
+                color: 'red',
+                continueScreen: 'main'
+            });
+            setScreen('flowNotice');
+        } else {
+            setImportValidation(result);
+            setScreen('importPreview');
+        }
+    }, []);
+
+    const handleImportApply = useCallback((mode: 'replace' | 'merge') => {
+        if (!settings || importValidation?.status !== 'valid') {
+            return;
+        }
+        const importedSettings = applyTuiImport(
+            settings,
+            importValidation.data,
+            mode,
+            importValidation.presentKeys
+        );
+        setSettings(importedSettings);
+        setHasChanges(true);
+        setImportValidation(null);
+        setFlashMessage({ text: 'Config imported — review and save', color: 'green' });
+        setScreen('main');
+    }, [importValidation, settings]);
+
     if (!settings || !hasLoadedClaudeStatus || !hasLoadedInstalledState) {
         return <Text>Loading settings...</Text>;
     }
@@ -935,6 +1009,12 @@ export const App: React.FC = () => {
                 break;
             case 'configureStatusLine':
                 setScreen('refreshInterval');
+                break;
+            case 'exportConfig':
+                setScreen('exportConfig');
+                break;
+            case 'importConfig':
+                setScreen('importConfig');
                 break;
             case 'starGithub':
                 setConfirmDialog({
@@ -1279,6 +1359,8 @@ export const App: React.FC = () => {
                         currentInterval={currentRefreshInterval}
                         supportsRefreshInterval={supportsRefreshInterval}
                         gitCacheTtlSeconds={settings.gitCacheTtlSeconds}
+                        terminalWidthCacheTtlSeconds={settings.terminalWidthCacheTtlSeconds}
+                        customCommandCacheTtlSeconds={settings.customCommandCacheTtlSeconds}
                         onUpdate={(interval) => {
                             const previous = currentRefreshInterval;
                             setCurrentRefreshInterval(interval);
@@ -1305,6 +1387,28 @@ export const App: React.FC = () => {
                             });
                             setFlashMessage({
                                 text: '✓ Git cache TTL updated',
+                                color: 'green'
+                            });
+                            setScreen('main');
+                        }}
+                        onTerminalWidthCacheTtlUpdate={(ttlSeconds) => {
+                            setSettings({
+                                ...settings,
+                                terminalWidthCacheTtlSeconds: ttlSeconds
+                            });
+                            setFlashMessage({
+                                text: '✓ Terminal Width cache TTL updated',
+                                color: 'green'
+                            });
+                            setScreen('main');
+                        }}
+                        onCustomCommandCacheTtlUpdate={(ttlSeconds) => {
+                            setSettings({
+                                ...settings,
+                                customCommandCacheTtlSeconds: ttlSeconds
+                            });
+                            setFlashMessage({
+                                text: '✓ Custom command cache TTL updated',
                                 color: 'green'
                             });
                             setScreen('main');
@@ -1342,6 +1446,32 @@ export const App: React.FC = () => {
                         installingFonts={installingFonts}
                         fontInstallMessage={fontInstallMessage}
                         onClearMessage={() => { setFontInstallMessage(null); }}
+                    />
+                )}
+
+                {screen === 'exportConfig' && (
+                    <ExportConfigDialog
+                        onExport={(filePath) => { void handleExportConfig(filePath); }}
+                        onCancel={() => { setScreen('main'); }}
+                    />
+                )}
+
+                {screen === 'importConfig' && (
+                    <ImportConfigDialog
+                        onFileChosen={(filePath) => { void handleImportFileChosen(filePath); }}
+                        onCancel={() => { setScreen('main'); }}
+                    />
+                )}
+
+                {screen === 'importPreview' && importValidation?.status === 'valid' && (
+                    <ImportPreviewDialog
+                        validation={importValidation}
+                        currentSettings={settings}
+                        onApply={(mode) => { handleImportApply(mode); }}
+                        onCancel={() => {
+                            setImportValidation(null);
+                            setScreen('main');
+                        }}
                     />
                 )}
             </Box>

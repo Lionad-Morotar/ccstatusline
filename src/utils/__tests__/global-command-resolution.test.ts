@@ -17,7 +17,7 @@ import {
 } from '../package-manager-executable';
 
 function mockExecFileSync(responses: Record<string, string>) {
-    return vi.spyOn(childProcess, 'execFileSync').mockImplementation((command, args) => {
+    const spy = vi.spyOn(childProcess, 'execFileSync').mockImplementation((command, args) => {
         const key = `${command} ${(args as string[]).join(' ')}`;
         const response = responses[key];
 
@@ -27,6 +27,14 @@ function mockExecFileSync(responses: Record<string, string>) {
 
         return response;
     });
+
+    // Other suites replace child_process wholesale via vi.mock, which is not
+    // file-scoped under the bun runner. When one of those runs first, vi.spyOn
+    // hands back that already-installed mock along with its accumulated call
+    // history, so assertions here would otherwise inspect foreign calls.
+    spy.mockClear();
+
+    return spy;
 }
 
 describe('global command resolution', () => {
@@ -69,6 +77,32 @@ describe('global command resolution', () => {
         expect(getCommandResolutionPaths('ccstatusline', { platform: 'linux' })).toEqual([
             '/home/alice/.bun/bin/ccstatusline'
         ]);
+    });
+
+    it('silences child stderr on best-effort probes so failures cannot leak to the terminal', () => {
+        const execFileSyncSpy = mockExecFileSync({
+            'which -a ccstatusline': '/home/alice/.bun/bin/ccstatusline\n',
+            'bun pm bin -g': '/home/alice/.bun/bin\n'
+        });
+
+        inspectGlobalCommandResolution('bun', { platform: 'linux' });
+
+        expect(execFileSyncSpy).toHaveBeenCalled();
+        for (const call of execFileSyncSpy.mock.calls) {
+            const options = call[2] as { stdio?: string[] };
+            expect(options.stdio?.[2]).toBe('ignore');
+        }
+    });
+
+    it('treats a probe that throws with stderr output as not found without surfacing an error', () => {
+        vi.spyOn(childProcess, 'execFileSync').mockImplementation(() => {
+            throw new Error('error: No package.json was found for directory "C:\\Users\\alice\\.bun\\install\\global"');
+        });
+
+        const resolution = inspectGlobalCommandResolution('bun', { platform: 'win32' });
+
+        expect(resolution.resolvedPaths).toEqual([]);
+        expect(resolution.expectedBinDir).toBeNull();
     });
 
     it('warns when multiple PATH directories contain ccstatusline', () => {
