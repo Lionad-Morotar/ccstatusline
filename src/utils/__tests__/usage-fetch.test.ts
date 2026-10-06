@@ -419,6 +419,8 @@ describe('fetchUsageData error handling', () => {
         }
     });
 
+    // Ten sequential subprocess probes; the 5s test default sits below their cumulative
+    // spawn cost, so this case declares its own ceiling.
     it('preserves root errors within a process and keeps existing proxy and cache behavior', () => {
         const harness = createProbeHarness();
 
@@ -589,7 +591,7 @@ describe('fetchUsageData error handling', () => {
         } finally {
             harness.cleanup();
         }
-    });
+    }, 30_000);
 
     it('treats null API per-model buckets as zero usage', () => {
         const harness = createProbeHarness();
