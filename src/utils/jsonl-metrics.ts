@@ -33,6 +33,7 @@ import {
     collectTranscriptUsageRecord,
     createTranscriptUsageCollector,
     finishTranscriptUsageCollector,
+    getResponseUsageKey,
     type TranscriptUsageScan
 } from './task-usage-scan';
 
@@ -94,16 +95,18 @@ interface CollectedSpeedMetrics {
 
 interface TokenMetricEntry {
     usage: UsageTokens;
+    /** API response the line belongs to; null counts the line on its own. */
+    responseKey: string | null;
     stopReason: string | null | undefined;
     timestampMs: number | null;
     isMainChain: boolean;
 }
 
 interface TokenMetricAccumulator {
-    inputTokens: number;
-    outputTokens: number;
-    cacheReadTokens: number;
-    cacheCreationTokens: number;
+    /** Settled usage per API response, so a response split across lines counts once. */
+    responseUsage: Map<string, UsageTokens>;
+    /** Lines without a message id, summed as they come. */
+    unkeyedUsage: UsageTokens;
     mostRecentMainChainUsage: UsageTokens | null;
     mostRecentTimestampMs: number | null;
     mostRecentPostCompactionUsage: UsageTokens | null;
@@ -133,10 +136,8 @@ function createEmptyTokenMetrics(): TokenMetrics {
 
 function createTokenMetricAccumulator(): TokenMetricAccumulator {
     return {
-        inputTokens: 0,
-        outputTokens: 0,
-        cacheReadTokens: 0,
-        cacheCreationTokens: 0,
+        responseUsage: new Map(),
+        unkeyedUsage: { input: 0, output: 0, creation: 0, read: 0 },
         mostRecentMainChainUsage: null,
         mostRecentTimestampMs: null,
         mostRecentPostCompactionUsage: null,
@@ -155,10 +156,14 @@ function accumulateTokenMetricEntry(
     includePostCompactionUsage: boolean
 ): void {
     const { usage } = entry;
-    accumulator.inputTokens += usage.input;
-    accumulator.outputTokens += usage.output;
-    accumulator.cacheReadTokens += usage.read;
-    accumulator.cacheCreationTokens += usage.creation;
+    if (entry.responseKey === null) {
+        accumulator.unkeyedUsage.input += usage.input;
+        accumulator.unkeyedUsage.output += usage.output;
+        accumulator.unkeyedUsage.read += usage.read;
+        accumulator.unkeyedUsage.creation += usage.creation;
+    } else {
+        accumulator.responseUsage.set(entry.responseKey, usage);
+    }
 
     if (!entry.isMainChain || entry.timestampMs === null) {
         return;
@@ -201,6 +206,7 @@ function collectTokenMetricRecord(state: TokenMetricState, data: TranscriptLine 
     if (usage) {
         const entry: TokenMetricEntry = {
             usage: parseUsageTokens(usage),
+            responseKey: getResponseUsageKey(message.id, data?.requestId),
             stopReason: message.stop_reason,
             timestampMs,
             isMainChain: data?.isSidechain !== true && !data?.isApiErrorMessage
@@ -220,8 +226,12 @@ function collectTokenMetricRecord(state: TokenMetricState, data: TranscriptLine 
 }
 
 function finishTokenMetrics(state: TokenMetricState): TokenMetrics {
-    if (state.hasStopReasonField && state.lastUsageEntry?.stopReason === null) {
-        accumulateTokenMetricEntry(state.metrics, state.lastUsageEntry, !state.boundaryAfterLastUsage);
+    const lastEntry = state.lastUsageEntry;
+    // An unfinished trailing response counts, but never in place of settled
+    // usage already recorded for the same response.
+    if (state.hasStopReasonField && lastEntry?.stopReason === null
+        && (lastEntry.responseKey === null || !state.metrics.responseUsage.has(lastEntry.responseKey))) {
+        accumulateTokenMetricEntry(state.metrics, lastEntry, !state.boundaryAfterLastUsage);
     }
 
     const contextLengthFromUsage = (usage: UsageTokens | null): number | null => usage
@@ -230,15 +240,23 @@ function finishTokenMetrics(state: TokenMetricState): TokenMetrics {
     const contextLength = state.sawCompactBoundary
         ? (contextLengthFromUsage(state.metrics.mostRecentPostCompactionUsage) ?? state.lastCompactBoundaryPostTokens ?? 0)
         : (contextLengthFromUsage(state.metrics.mostRecentMainChainUsage) ?? 0);
-    const cachedTokens = state.metrics.cacheReadTokens + state.metrics.cacheCreationTokens;
+
+    const totals = { ...state.metrics.unkeyedUsage };
+    for (const usage of state.metrics.responseUsage.values()) {
+        totals.input += usage.input;
+        totals.output += usage.output;
+        totals.read += usage.read;
+        totals.creation += usage.creation;
+    }
+    const cachedTokens = totals.read + totals.creation;
 
     return {
-        inputTokens: state.metrics.inputTokens,
-        outputTokens: state.metrics.outputTokens,
+        inputTokens: totals.input,
+        outputTokens: totals.output,
         cachedTokens,
-        cacheReadTokens: state.metrics.cacheReadTokens,
-        cacheCreationTokens: state.metrics.cacheCreationTokens,
-        totalTokens: state.metrics.inputTokens + state.metrics.outputTokens + cachedTokens,
+        cacheReadTokens: totals.read,
+        cacheCreationTokens: totals.creation,
+        totalTokens: totals.input + totals.output + cachedTokens,
         contextLength
     };
 }
@@ -306,14 +324,35 @@ function normalizeWindowSeconds(value: number | undefined): number | null {
     return normalized > 0 ? normalized : null;
 }
 
-interface SpeedMetricCollectorState extends CollectedSpeedMetrics { lastUserTimestampMs: number | null }
+interface SpeedMetricCollectorState extends CollectedSpeedMetrics {
+    lastUserTimestampMs: number | null;
+    /** Position in `requests` of each API response seen so far. */
+    requestIndexByResponse: Map<string, number>;
+}
 
 function createSpeedMetricCollector(): SpeedMetricCollectorState {
     return {
         requests: [],
         latestTimestampMs: null,
-        lastUserTimestampMs: null
+        lastUserTimestampMs: null,
+        requestIndexByResponse: new Map()
     };
+}
+
+// A response written as several lines is one request: it keeps the latest
+// line's counts and stretches its window to the latest line, so neither the
+// request count nor the token totals grow with the number of content blocks.
+function mergeSpeedRequest(existing: SpeedRequest, next: SpeedRequest): void {
+    existing.inputTokens = next.inputTokens;
+    existing.outputTokens = next.outputTokens;
+    if (next.assistantTimestampMs === null) {
+        return;
+    }
+    existing.assistantTimestampMs = next.assistantTimestampMs;
+    const startMs = existing.interval?.startMs ?? next.interval?.startMs;
+    if (startMs !== undefined && next.assistantTimestampMs > startMs) {
+        existing.interval = { startMs, endMs: next.assistantTimestampMs };
+    }
 }
 
 function collectSpeedMetricRecord(
@@ -345,12 +384,24 @@ function collectSpeedMetricRecord(
     }
 
     const usage = parseUsageTokens(data.message.usage);
-    state.requests.push({
+    const request: SpeedRequest = {
         inputTokens: usage.input,
         outputTokens: usage.output,
         assistantTimestampMs: timestampMs,
         interval
-    });
+    };
+
+    const responseKey = getResponseUsageKey(data.message.id, data.requestId);
+    const existingIndex = responseKey === null ? undefined : state.requestIndexByResponse.get(responseKey);
+    const existing = existingIndex === undefined ? undefined : state.requests[existingIndex];
+    if (existing) {
+        mergeSpeedRequest(existing, request);
+        return;
+    }
+    if (responseKey !== null) {
+        state.requestIndexByResponse.set(responseKey, state.requests.length);
+    }
+    state.requests.push(request);
 }
 
 async function collectSpeedMetricsFromFile(filePath: string, ignoreSidechain: boolean): Promise<CollectedSpeedMetrics> {

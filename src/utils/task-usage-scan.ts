@@ -134,6 +134,21 @@ export function extractFlowAgentLaunches(command: string, cwd: string | null = n
     return launches;
 }
 
+/**
+ * Identifies the API response a usage record belongs to.
+ *
+ * @remarks
+ * Claude Code writes each content block of a response as its own line, every
+ * one repeating the response's full usage, so usage must be summed per
+ * response rather than per line. Null when the record carries no message id.
+ */
+export function getResponseUsageKey(messageId: unknown, requestId: unknown): string | null {
+    if (typeof messageId !== 'string' || messageId === '') {
+        return null;
+    }
+    return `${messageId}\u0000${typeof requestId === 'string' ? requestId : ''}`;
+}
+
 function asRecord(value: unknown): Record<string, unknown> | null {
     return value && typeof value === 'object' && !Array.isArray(value)
         ? value as Record<string, unknown>
@@ -276,11 +291,8 @@ export function collectTranscriptUsageRecord(collector: TranscriptUsageCollector
     }
 
     const tokens = parseUsageTokens(usage);
-    const messageId = typeof message.id === 'string' && message.id !== '' ? message.id : null;
-    const requestId = typeof record.requestId === 'string' ? record.requestId : '';
-    const key = messageId === null ? null : `${messageId}\u0000${requestId}`;
     const entry: UsageEntry = {
-        key,
+        key: getResponseUsageKey(message.id, record.requestId),
         inputTokens: tokens.input,
         outputTokens: tokens.output,
         cacheReadTokens: tokens.read,
