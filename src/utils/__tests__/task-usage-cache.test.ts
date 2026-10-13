@@ -192,6 +192,11 @@ describe('openTaskUsageCache', () => {
             JSON.stringify({ version: 0, files: {}, locations: {} }),
             JSON.stringify({
                 version: 1,
+                files: { [filePath]: { size: stat.size, mtimeMs: stat.mtimeMs, scan: { entries: [['x', 99, 0, 0, 0]], agentIds: [], invocations: [], firstTimestampMs: null } } },
+                locations: {}
+            }),
+            JSON.stringify({
+                version: 2,
                 files: { [filePath]: { size: stat.size, mtimeMs: stat.mtimeMs, scan: { entries: [['x', 'NaN', 0, 0, 0]], agentIds: [], invocations: [], firstTimestampMs: null } } },
                 locations: {}
             })

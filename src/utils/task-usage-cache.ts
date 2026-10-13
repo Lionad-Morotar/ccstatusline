@@ -17,7 +17,7 @@ import {
     type UsageEntry
 } from './task-usage-scan';
 
-const CACHE_VERSION = 1;
+const CACHE_VERSION = 2;
 // Cache files belong to one main transcript each; once that session has been
 // idle this long nobody repaints it, so the file is only taking disk space.
 const STALE_CACHE_FILE_MS = 14 * 24 * 60 * 60 * 1000;

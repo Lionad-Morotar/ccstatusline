@@ -104,7 +104,7 @@ All widgets must implement:
 - Model, Version, OutputStyle, VoiceStatus, ClaudeStatus - Claude Code metadata and service-health display
 - GitBranch, GitChanges, GitInsertions, GitDeletions, GitWorktree - Git repository status
 - TokensInput, TokensOutput, TokensCached, TokensTotal - Token usage metrics
-- TaskTokensTotal - Task-wide tokens: main session + subagents + flow-agent external review sessions (src/utils/task-usage*.ts)
+- TaskTokensTotal - Task-wide tokens: main session + subagents + flow-agent external review sessions, plus estimated compaction requests (src/utils/task-usage*.ts)
 - ContextLength, ContextPercentage, ContextPercentageUsable - Context window metrics (uses dynamic model-based context windows: 1M for Sonnet 4.5 with [1m] suffix, 200k for all other models)
 - BlockTimer, SessionClock, SessionCost - Time and cost tracking
 - CurrentWorkingDir, TerminalWidth - Environment info

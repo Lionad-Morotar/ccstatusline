@@ -148,6 +148,7 @@ function resolveVisitKey(filePath: string): string {
  * transcripts recorded under `<flowDevHome>/runs/<slug>/review-*.session`.
  * Usage is de-duplicated across all files by API response, so a resumed
  * review that copies earlier history into a forked transcript adds nothing.
+ * Compactions count as estimated requests, since none carries recorded usage.
  *
  * @param mainScan - Scan of the main transcript when the caller already has one
  */

@@ -251,3 +251,89 @@ describe('scanTranscriptUsage', () => {
         }
     });
 });
+
+describe('scanTranscriptUsage compaction requests', () => {
+    function compactBoundary(params: { uuid?: string; preTokens?: unknown; isSidechain?: boolean }): Record<string, unknown> {
+        return {
+            type: 'system',
+            subtype: 'compact_boundary',
+            ...(params.uuid ? { uuid: params.uuid } : {}),
+            ...(params.isSidechain ? { isSidechain: true } : {}),
+            timestamp: '2026-10-12T10:05:00.000Z',
+            compactMetadata: { trigger: 'auto', preTokens: params.preTokens, postTokens: 32566 }
+        };
+    }
+
+    function compactSummary(content: unknown): Record<string, unknown> {
+        return {
+            type: 'user',
+            isCompactSummary: true,
+            timestamp: '2026-10-12T10:05:00.000Z',
+            message: { role: 'user', content }
+        };
+    }
+
+    it('counts each compaction as one request: the compacted context in, the summary out', async () => {
+        const transcript = writeTranscript([
+            assistantLine({ id: 'msg_1', requestId: 'req_1', input: 10, output: 20 }),
+            compactBoundary({ uuid: 'boundary-1', preTokens: 283759 }),
+            { type: 'attachment', timestamp: '2026-10-12T10:05:00.000Z' },
+            compactSummary(`${'a'.repeat(400)}压缩摘要`)
+        ]);
+
+        const scan = await scanTranscriptUsage(transcript);
+
+        expect(sumUsageEntries(scan.usageEntries)).toEqual({
+            inputTokens: 283769,
+            outputTokens: 20 + 100 + 4,
+            cacheReadTokens: 0,
+            cacheCreationTokens: 0,
+            totalTokens: 283769 + 124
+        });
+    });
+
+    it('reads summaries written as text blocks', async () => {
+        const transcript = writeTranscript([
+            compactBoundary({ uuid: 'boundary-1', preTokens: 1000 }),
+            compactSummary([{ type: 'text', text: 'b'.repeat(40) }, { type: 'text', text: 'c'.repeat(40) }])
+        ]);
+
+        const scan = await scanTranscriptUsage(transcript);
+
+        expect(sumUsageEntries(scan.usageEntries).outputTokens).toBe(20);
+    });
+
+    it('counts compactions inside subagent transcripts', async () => {
+        const transcript = writeTranscript([
+            compactBoundary({ uuid: 'boundary-1', preTokens: 500, isSidechain: true })
+        ]);
+
+        const scan = await scanTranscriptUsage(transcript);
+
+        expect(sumUsageEntries(scan.usageEntries).inputTokens).toBe(500);
+    });
+
+    it('counts a repeated boundary record once', async () => {
+        const transcript = writeTranscript([
+            compactBoundary({ uuid: 'boundary-1', preTokens: 500 }),
+            compactBoundary({ uuid: 'boundary-1', preTokens: 500 })
+        ]);
+
+        const scan = await scanTranscriptUsage(transcript);
+
+        expect(scan.usageEntries).toHaveLength(1);
+        expect(scan.usageEntries[0]?.key).not.toBeNull();
+    });
+
+    it('ignores boundaries without a context size and summaries without a boundary', async () => {
+        const transcript = writeTranscript([
+            compactSummary('orphan summary text'),
+            compactBoundary({ uuid: 'boundary-1' }),
+            compactSummary('summary of an unmeasured compaction')
+        ]);
+
+        const scan = await scanTranscriptUsage(transcript);
+
+        expect(scan.usageEntries).toEqual([]);
+    });
+});

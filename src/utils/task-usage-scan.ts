@@ -45,6 +45,8 @@ export interface TranscriptUsageCollector {
     agentIds: Set<string>;
     flowAgentInvocations: FlowAgentInvocation[];
     firstTimestampMs: number | null;
+    /** Latest compaction still waiting for the summary it produced. */
+    pendingCompaction: UsageEntry | null;
 }
 
 const RUNNER_PATTERN = /run-external-review(?:\.[cm]?[jt]s)?\b/g;
@@ -116,8 +118,72 @@ export function createTranscriptUsageCollector(): TranscriptUsageCollector {
         anonymousEntries: [],
         agentIds: new Set(),
         flowAgentInvocations: [],
-        firstTimestampMs: null
+        firstTimestampMs: null,
+        pendingCompaction: null
     };
+}
+
+const CJK_CHARACTER_PATTERN = /[\u1100-\u11ff\u2e80-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]/g;
+
+/** Rough token count of model-written text: one per CJK character, one per four other characters. */
+export function estimateTextTokens(text: string): number {
+    const cjkCount = text.match(CJK_CHARACTER_PATTERN)?.length ?? 0;
+    return cjkCount + Math.ceil((text.length - cjkCount) / 4);
+}
+
+function getMessageText(content: unknown): string {
+    if (typeof content === 'string') {
+        return content;
+    }
+    if (!Array.isArray(content)) {
+        return '';
+    }
+    return content
+        .map(block => asRecord(block)?.text)
+        .filter((text): text is string => typeof text === 'string')
+        .join('');
+}
+
+function addEntry(collector: TranscriptUsageCollector, entry: UsageEntry): void {
+    if (entry.key === null) {
+        collector.anonymousEntries.push(entry);
+    } else {
+        // Later copies of a streamed response carry the settled counts.
+        collector.keyedEntries.set(entry.key, entry);
+    }
+}
+
+// Claude Code writes no usage for the request that summarises the context, so
+// it is reconstructed: the boundary records the context size sent in, and the
+// summary that follows it is the request's output.
+function collectCompaction(collector: TranscriptUsageCollector, record: Record<string, unknown>): boolean {
+    if (record.type === 'system' && record.subtype === 'compact_boundary') {
+        const preTokens = asRecord(record.compactMetadata)?.preTokens;
+        if (typeof preTokens !== 'number' || !Number.isFinite(preTokens) || preTokens <= 0) {
+            collector.pendingCompaction = null;
+            return true;
+        }
+        const entry: UsageEntry = {
+            key: typeof record.uuid === 'string' && record.uuid !== '' ? `compact\u0000${record.uuid}` : null,
+            inputTokens: preTokens,
+            outputTokens: 0,
+            cacheReadTokens: 0,
+            cacheCreationTokens: 0
+        };
+        addEntry(collector, entry);
+        collector.pendingCompaction = entry;
+        return true;
+    }
+
+    if (record.isCompactSummary === true) {
+        if (collector.pendingCompaction) {
+            collector.pendingCompaction.outputTokens = estimateTextTokens(getMessageText(asRecord(record.message)?.content));
+            collector.pendingCompaction = null;
+        }
+        return true;
+    }
+
+    return false;
 }
 
 export function collectTranscriptUsageRecord(collector: TranscriptUsageCollector, data: unknown): void {
@@ -129,6 +195,10 @@ export function collectTranscriptUsageRecord(collector: TranscriptUsageCollector
     const timestampMs = parseTimestampMs(record.timestamp);
     collector.firstTimestampMs ??= timestampMs;
     collectAgentIds(record, collector.agentIds);
+
+    if (collectCompaction(collector, record)) {
+        return;
+    }
 
     const message = asRecord(record.message);
     if (!message) {
@@ -159,18 +229,14 @@ export function collectTranscriptUsageRecord(collector: TranscriptUsageCollector
         cacheReadTokens: tokens.read,
         cacheCreationTokens: tokens.creation
     };
-
-    if (key === null) {
-        collector.anonymousEntries.push(entry);
-    } else {
-        // Later copies of a streamed response carry the settled counts.
-        collector.keyedEntries.set(key, entry);
-    }
+    addEntry(collector, entry);
 }
 
 export function finishTranscriptUsageCollector(collector: TranscriptUsageCollector): TranscriptUsageScan {
     return {
-        usageEntries: [...collector.keyedEntries.values(), ...collector.anonymousEntries],
+        // Copies, because a summary arriving after this scan still fills in
+        // its compaction's output on the collector's own entry.
+        usageEntries: [...collector.keyedEntries.values(), ...collector.anonymousEntries].map(entry => ({ ...entry })),
         agentIds: Array.from(collector.agentIds),
         flowAgentInvocations: collector.flowAgentInvocations.slice(),
         firstTimestampMs: collector.firstTimestampMs
