@@ -11,7 +11,7 @@ import {
 import {
     collectTranscriptUsageRecord,
     createTranscriptUsageCollector,
-    extractFlowAgentSlugs,
+    extractFlowAgentLaunches,
     finishTranscriptUsageCollector,
     readTranscriptUsage,
     scanTranscriptUsage,
@@ -67,36 +67,55 @@ afterEach(() => {
     }
 });
 
-describe('extractFlowAgentSlugs', () => {
-    it('reads the slug from a multi-line runner invocation', () => {
+describe('extractFlowAgentLaunches', () => {
+    const slugsOf = (command: string) => extractFlowAgentLaunches(command).map(launch => launch.slug);
+
+    it('reads the slug and review folder from a multi-line runner invocation', () => {
         const command = 'node ~/.claude/skills/flow-agent/scripts/run-external-review.ts \\\n'
             + '  --slug 261012-syspolicyd-hook-timeout-review \\\n'
             + '  --review-dir /tmp/reviews/x \\\n'
             + '  --caller-model glm-5.3-flash';
-        expect(extractFlowAgentSlugs(command)).toEqual(['261012-syspolicyd-hook-timeout-review']);
+        expect(extractFlowAgentLaunches(command)).toEqual([
+            { slug: '261012-syspolicyd-hook-timeout-review', reviewDir: path.normalize('/tmp/reviews/x') }
+        ]);
     });
 
     it('accepts --slug=value and quoted values', () => {
-        expect(extractFlowAgentSlugs('node run-external-review.ts --slug=260727-a-code-review --caller-model x')).toEqual(['260727-a-code-review']);
-        expect(extractFlowAgentSlugs('node run-external-review.ts --slug "260727-b" --caller-model x')).toEqual(['260727-b']);
-        expect(extractFlowAgentSlugs('node run-external-review.ts --slug \'260727-c\' --caller-model x')).toEqual(['260727-c']);
+        expect(slugsOf('node run-external-review.ts --slug=260727-a-code-review --caller-model x')).toEqual(['260727-a-code-review']);
+        expect(slugsOf('node run-external-review.ts --slug "260727-b" --caller-model x')).toEqual(['260727-b']);
+        expect(slugsOf('node run-external-review.ts --slug \'260727-c\' --caller-model x')).toEqual(['260727-c']);
     });
 
     it('returns every invocation chained in one command', () => {
         const command = 'node run-external-review.ts --slug first-review --caller-model x; '
             + 'node run-external-review.ts --slug second-review --caller-model x';
-        expect(extractFlowAgentSlugs(command)).toEqual(['first-review', 'second-review']);
+        expect(slugsOf(command)).toEqual(['first-review', 'second-review']);
     });
 
-    it('ignores commands that only mention the runner without a slug', () => {
-        expect(extractFlowAgentSlugs('node run-external-review.ts --list-models')).toEqual([]);
-        expect(extractFlowAgentSlugs('rg -n "projects" ~/.claude/skills/flow-agent/scripts/run-external-review.ts')).toEqual([]);
-        expect(extractFlowAgentSlugs('node other-script.ts --slug not-a-runner')).toEqual([]);
+    it('ignores commands that only mention the runner without a slug or review folder', () => {
+        expect(extractFlowAgentLaunches('node run-external-review.ts --list-models')).toEqual([]);
+        expect(extractFlowAgentLaunches('rg -n "projects" ~/.claude/skills/flow-agent/scripts/run-external-review.ts')).toEqual([]);
+        expect(extractFlowAgentLaunches('node other-script.ts --slug not-a-runner')).toEqual([]);
     });
 
-    it('skips slugs passed through shell variables', () => {
-        expect(extractFlowAgentSlugs('node run-external-review.ts --slug "$SLUG" --caller-model x')).toEqual([]);
-        expect(extractFlowAgentSlugs('node run-external-review.ts --slug ${K}-review --caller-model x')).toEqual([]);
+    it('drops slugs passed through shell variables but keeps a usable review folder', () => {
+        expect(extractFlowAgentLaunches('node run-external-review.ts --slug "$SLUG" --caller-model x')).toEqual([]);
+        expect(extractFlowAgentLaunches('node run-external-review.ts --slug ${K}-review --review-dir /tmp/r --caller-model x')).toEqual([
+            { slug: null, reviewDir: path.normalize('/tmp/r') }
+        ]);
+    });
+
+    it('resolves $PWD and relative review folders against the working directory', () => {
+        const cwd = path.join(os.tmpdir(), 'repo');
+        const reviewDirOf = (command: string, workingDir: string | null = cwd) => extractFlowAgentLaunches(command, workingDir)[0]?.reviewDir;
+
+        expect(reviewDirOf('node run-external-review.ts --slug s --review-dir "$PWD/docs/reviews/a"')).toBe(path.join(cwd, 'docs/reviews/a'));
+        expect(reviewDirOf('node run-external-review.ts --slug s --review-dir ${PWD}/docs/reviews/b')).toBe(path.join(cwd, 'docs/reviews/b'));
+        expect(reviewDirOf('node run-external-review.ts --slug s --review-dir docs/reviews/c')).toBe(path.join(cwd, 'docs/reviews/c'));
+        expect(reviewDirOf('node run-external-review.ts --slug s --review-dir ~/reviews/d')).toBe(path.join(os.homedir(), 'reviews/d'));
+        expect(reviewDirOf('node run-external-review.ts --slug s --review-dir docs/reviews/c', null)).toBeNull();
+        expect(reviewDirOf('node run-external-review.ts --slug s --review-dir \'$PWD/docs\'')).toBeNull();
+        expect(reviewDirOf('node run-external-review.ts --slug s --review-dir "$DIR/docs"')).toBeNull();
     });
 });
 
@@ -184,7 +203,7 @@ describe('scanTranscriptUsage', () => {
         const scan = await scanTranscriptUsage(transcript);
 
         expect(scan.flowAgentInvocations).toEqual([
-            { slug: '261012-a-review', timestampMs: Date.parse('2026-10-12T10:00:00.000Z') }
+            { slug: '261012-a-review', reviewDir: null, timestampMs: Date.parse('2026-10-12T10:00:00.000Z') }
         ]);
         expect(scan.firstTimestampMs).toBe(Date.parse('2026-10-12T09:59:00.000Z'));
     });

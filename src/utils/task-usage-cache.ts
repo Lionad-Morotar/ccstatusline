@@ -17,13 +17,13 @@ import {
     type UsageEntry
 } from './task-usage-scan';
 
-const CACHE_VERSION = 2;
+const CACHE_VERSION = 3;
 // Cache files belong to one main transcript each; once that session has been
 // idle this long nobody repaints it, so the file is only taking disk space.
 const STALE_CACHE_FILE_MS = 14 * 24 * 60 * 60 * 1000;
 
 type StoredUsageEntry = [string | null, number, number, number, number];
-type StoredInvocation = [string, number | null];
+type StoredInvocation = [string | null, string | null, number | null];
 
 interface StoredScan {
     entries: StoredUsageEntry[];
@@ -76,9 +76,10 @@ function isStoredUsageEntry(value: unknown): value is StoredUsageEntry {
 
 function isStoredInvocation(value: unknown): value is StoredInvocation {
     return Array.isArray(value)
-        && value.length === 2
-        && typeof value[0] === 'string'
-        && (value[1] === null || isFiniteNumber(value[1]));
+        && value.length === 3
+        && (value[0] === null || typeof value[0] === 'string')
+        && (value[1] === null || typeof value[1] === 'string')
+        && (value[2] === null || isFiniteNumber(value[2]));
 }
 
 function isStoredFile(value: unknown): value is StoredFile {
@@ -150,7 +151,7 @@ function toStoredScan(scan: TranscriptUsageScan): StoredScan {
             entry.cacheCreationTokens
         ]),
         agentIds: scan.agentIds,
-        invocations: scan.flowAgentInvocations.map(invocation => [invocation.slug, invocation.timestampMs]),
+        invocations: scan.flowAgentInvocations.map(invocation => [invocation.slug, invocation.reviewDir, invocation.timestampMs]),
         firstTimestampMs: scan.firstTimestampMs
     };
 }
@@ -167,7 +168,8 @@ function fromStoredScan(stored: StoredScan): TranscriptUsageScan {
         agentIds: stored.agentIds.slice(),
         flowAgentInvocations: stored.invocations.map((invocation): FlowAgentInvocation => ({
             slug: invocation[0],
-            timestampMs: invocation[1]
+            reviewDir: invocation[1],
+            timestampMs: invocation[2]
         })),
         firstTimestampMs: stored.firstTimestampMs
     };

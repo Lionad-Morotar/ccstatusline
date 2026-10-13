@@ -45,6 +45,12 @@ interface InvocationWindow {
     endMs: number | null;
 }
 
+/** One place a runner records session ids, with the launches that point at it. */
+interface SessionSource {
+    readSessionIds: () => string[];
+    window: InvocationWindow;
+}
+
 // The runner probes launchers before the review session writes its first
 // record, and a fallback chain can run several models back to back, so the
 // accepted start window is generous on the late side.
@@ -52,6 +58,7 @@ const EXTERNAL_SESSION_LEAD_MS = 5 * 60 * 1000;
 const EXTERNAL_SESSION_TRAIL_MS = 6 * 60 * 60 * 1000;
 const SESSION_ID_PATTERN = /^[\w-]+$/;
 const SESSION_FILE_PATTERN = /^review-.+\.session$/;
+const RUNNER_RESULT_PATTERN = /^runner-result(?:-\d+)?\.json$/;
 export function getFlowDevHome(): string {
     return process.env.FLOW_DEV_HOME ?? path.join(os.homedir(), '.flow-dev');
 }
@@ -91,6 +98,34 @@ function readRunSessionIds(flowDevHome: string, slug: string): string[] {
     return Array.from(sessionIds);
 }
 
+// The runner overwrites `review-*.session` on every run of a slug, but numbers
+// its result files instead, so this survives a slug reused for a later review.
+function readRunnerResultSessionIds(reviewDir: string): string[] {
+    const sessionIds = new Set<string>();
+    for (const name of readDirNames(reviewDir)) {
+        if (!RUNNER_RESULT_PATTERN.test(name)) {
+            continue;
+        }
+        let parsed: unknown;
+        try {
+            parsed = JSON.parse(fs.readFileSync(path.join(reviewDir, name), 'utf-8'));
+        } catch {
+            continue;
+        }
+        const reviews = (parsed as { reviews?: unknown } | null)?.reviews;
+        if (!Array.isArray(reviews)) {
+            continue;
+        }
+        for (const review of reviews) {
+            const sessionId = (review as { session_id?: unknown } | null)?.session_id;
+            if (typeof sessionId === 'string' && SESSION_ID_PATTERN.test(sessionId)) {
+                sessionIds.add(sessionId);
+            }
+        }
+    }
+    return Array.from(sessionIds);
+}
+
 function locateSessionTranscript(projectsRoot: string, preferredDirs: string[], sessionId: string): string | null {
     const fileName = `${sessionId}.jsonl`;
     for (const dir of preferredDirs) {
@@ -110,17 +145,30 @@ function locateSessionTranscript(projectsRoot: string, preferredDirs: string[], 
     return null;
 }
 
-function groupInvocationWindows(invocations: FlowAgentInvocation[]): Map<string, InvocationWindow> {
-    const windows = new Map<string, InvocationWindow>();
-    for (const { slug, timestampMs } of invocations) {
-        const window = windows.get(slug) ?? { startMs: null, endMs: null };
+function collectSessionSources(invocations: FlowAgentInvocation[], flowDevHome: string): SessionSource[] {
+    const sources = new Map<string, SessionSource>();
+    const addLaunch = (key: string, readSessionIds: () => string[], timestampMs: number | null): void => {
+        let source = sources.get(key);
+        if (!source) {
+            source = { readSessionIds, window: { startMs: null, endMs: null } };
+            sources.set(key, source);
+        }
         if (timestampMs !== null) {
+            const { window } = source;
             window.startMs = window.startMs === null ? timestampMs : Math.min(window.startMs, timestampMs);
             window.endMs = window.endMs === null ? timestampMs : Math.max(window.endMs, timestampMs);
         }
-        windows.set(slug, window);
+    };
+
+    for (const { slug, reviewDir, timestampMs } of invocations) {
+        if (slug !== null) {
+            addLaunch(`run\u0000${slug}`, () => readRunSessionIds(flowDevHome, slug), timestampMs);
+        }
+        if (reviewDir !== null) {
+            addLaunch(`dir\u0000${reviewDir}`, () => readRunnerResultSessionIds(reviewDir), timestampMs);
+        }
     }
-    return windows;
+    return Array.from(sources.values());
 }
 
 function startedWithinWindow(firstTimestampMs: number | null, window: InvocationWindow): boolean {
@@ -145,7 +193,8 @@ function resolveVisitKey(filePath: string): string {
  * @remarks
  * Walks the main session, every subagent transcript, and every external
  * review session that a `run-external-review` call in any of those
- * transcripts recorded under `<flowDevHome>/runs/<slug>/review-*.session`.
+ * transcripts recorded under `<flowDevHome>/runs/<slug>/review-*.session` or
+ * in `<review-dir>/runner-result*.json`.
  * Usage is de-duplicated across all files by API response, so a resumed
  * review that copies earlier history into a forked transcript adds nothing.
  * Compactions count as estimated requests, since none carries recorded usage.
@@ -209,8 +258,8 @@ export async function getTaskUsageMetrics(
             });
         }
 
-        for (const [slug, window] of groupInvocationWindows(scan.flowAgentInvocations)) {
-            for (const sessionId of readRunSessionIds(flowDevHome, slug)) {
+        for (const { readSessionIds, window } of collectSessionSources(scan.flowAgentInvocations, flowDevHome)) {
+            for (const sessionId of readSessionIds()) {
                 const preferredDir = node.projectDir;
                 const externalPath = locateSession(
                     sessionId,

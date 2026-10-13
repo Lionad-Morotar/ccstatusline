@@ -1,4 +1,6 @@
 import * as fs from 'fs';
+import os from 'node:os';
+import path from 'node:path';
 
 import type { TokenTotals } from '../types';
 
@@ -25,11 +27,16 @@ export interface UsageEntry {
     cacheCreationTokens: number;
 }
 
-/** A flow-agent `run-external-review` launch found in a tool call. */
-export interface FlowAgentInvocation {
-    slug: string;
-    timestampMs: number | null;
+/** Where a flow-agent `run-external-review` launch records its sessions. */
+export interface FlowAgentLaunch {
+    /** Literal `--slug`, naming the run folder that holds `review-*.session`. */
+    slug: string | null;
+    /** Absolute `--review-dir`, which holds the runner's `runner-result*.json`. */
+    reviewDir: string | null;
 }
+
+/** A flow-agent launch found in a tool call, with the time it was issued. */
+export interface FlowAgentInvocation extends FlowAgentLaunch { timestampMs: number | null }
 
 /** Everything the task-usage graph needs from one transcript file. */
 export interface TranscriptUsageScan {
@@ -54,28 +61,77 @@ const RUNNER_PATTERN = /run-external-review(?:\.[cm]?[jt]s)?\b/g;
 // so a `--slug` belonging to a later command is never attributed to it.
 const COMMAND_END_PATTERN = /(?<!\\)\n|;|&&|\|/;
 const SLUG_ARGUMENT_PATTERN = /--slug(?:=|\s+)(?:"([^"]*)"|'([^']*)'|([^\s;&|]+))/;
+const REVIEW_DIR_ARGUMENT_PATTERN = /--review-dir(?:=|\s+)(?:"([^"]*)"|'([^']*)'|([^\s;&|]+))/;
 const VALID_SLUG_PATTERN = /^[\w.-]+$/;
+const PWD_PREFIX_PATTERN = /^\$(?:PWD|\{PWD\})(?=[/\\]|$)/;
+
+interface ShellArgument {
+    value: string;
+    singleQuoted: boolean;
+    unquoted: boolean;
+}
+
+function readShellArgument(pattern: RegExp, invocation: string): ShellArgument | null {
+    const match = pattern.exec(invocation);
+    if (!match) {
+        return null;
+    }
+    const value = match[1] ?? match[2] ?? match[3];
+    if (value === undefined || value === '') {
+        return null;
+    }
+    return { value, singleQuoted: match[2] !== undefined, unquoted: match[3] !== undefined };
+}
+
+// Mirrors what the shell would have passed: `$PWD` is the command's working
+// directory unless single-quoted, `~` expands only unquoted, and anything else
+// that still needs the shell to expand cannot be resolved afterwards.
+function resolveReviewDir(argument: ShellArgument, cwd: string | null): string | null {
+    let value = argument.value;
+    const pwdPrefix = argument.singleQuoted ? null : PWD_PREFIX_PATTERN.exec(value);
+    if (pwdPrefix) {
+        if (cwd === null) {
+            return null;
+        }
+        value = cwd + value.slice(pwdPrefix[0].length);
+    } else if (argument.unquoted && (value === '~' || value.startsWith('~/'))) {
+        value = path.join(os.homedir(), value.slice(1));
+    }
+    if (/[$`]/.test(value)) {
+        return null;
+    }
+    if (path.isAbsolute(value)) {
+        return path.normalize(value);
+    }
+    return cwd === null ? null : path.resolve(cwd, value);
+}
 
 /**
- * Returns the `--slug` of every flow-agent runner invocation in a shell command.
+ * Returns every flow-agent runner launch in a shell command.
  *
  * @remarks
- * Slugs that are not literal (shell variables, substitutions) cannot be
- * resolved to a run directory and are skipped.
+ * Arguments that only the shell could expand (variables other than `$PWD`,
+ * substitutions) are dropped; a launch with neither a usable slug nor a usable
+ * review folder is skipped.
+ *
+ * @param cwd - Working directory the command ran in, for `$PWD` and relative paths
  */
-export function extractFlowAgentSlugs(command: string): string[] {
-    const slugs: string[] = [];
+export function extractFlowAgentLaunches(command: string, cwd: string | null = null): FlowAgentLaunch[] {
+    const launches: FlowAgentLaunch[] = [];
     for (const match of command.matchAll(RUNNER_PATTERN)) {
         const rest = command.slice(match.index + match[0].length);
         const end = COMMAND_END_PATTERN.exec(rest);
         const invocation = end ? rest.slice(0, end.index) : rest;
-        const slugMatch = SLUG_ARGUMENT_PATTERN.exec(invocation);
-        const slug = slugMatch?.[1] ?? slugMatch?.[2] ?? slugMatch?.[3];
-        if (slug && VALID_SLUG_PATTERN.test(slug)) {
-            slugs.push(slug);
+
+        const slugArgument = readShellArgument(SLUG_ARGUMENT_PATTERN, invocation);
+        const slug = slugArgument && VALID_SLUG_PATTERN.test(slugArgument.value) ? slugArgument.value : null;
+        const reviewDirArgument = readShellArgument(REVIEW_DIR_ARGUMENT_PATTERN, invocation);
+        const reviewDir = reviewDirArgument ? resolveReviewDir(reviewDirArgument, cwd) : null;
+        if (slug !== null || reviewDir !== null) {
+            launches.push({ slug, reviewDir });
         }
     }
-    return slugs;
+    return launches;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -206,9 +262,10 @@ export function collectTranscriptUsageRecord(collector: TranscriptUsageCollector
     }
 
     if (record.type === 'assistant') {
+        const cwd = typeof record.cwd === 'string' && record.cwd !== '' ? record.cwd : null;
         for (const command of getToolCommands(message)) {
-            for (const slug of extractFlowAgentSlugs(command)) {
-                collector.flowAgentInvocations.push({ slug, timestampMs });
+            for (const launch of extractFlowAgentLaunches(command, cwd)) {
+                collector.flowAgentInvocations.push({ ...launch, timestampMs });
             }
         }
     }

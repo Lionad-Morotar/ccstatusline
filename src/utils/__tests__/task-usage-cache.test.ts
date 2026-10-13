@@ -52,7 +52,7 @@ function runnerCall(id: string, slug: string): Record<string, unknown> {
                 type: 'tool_use',
                 id: `call_${id}`,
                 name: 'Bash',
-                input: { command: `node run-external-review.ts --slug ${slug}` }
+                input: { command: `node run-external-review.ts --slug ${slug} --review-dir /tmp/reviews/${slug}` }
             }],
             usage: { input_tokens: 1, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
         }
@@ -138,7 +138,11 @@ describe('openTaskUsageCache', () => {
         const cached = await second.options.scanFile(filePath);
         expect(cached).toEqual(fresh);
         expect(cached.agentIds).toEqual(['child']);
-        expect(cached.flowAgentInvocations).toEqual([{ slug: 'my-slug', timestampMs: Date.parse('2026-10-12T10:00:00.000Z') }]);
+        expect(cached.flowAgentInvocations).toEqual([{
+            slug: 'my-slug',
+            reviewDir: path.normalize('/tmp/reviews/my-slug'),
+            timestampMs: Date.parse('2026-10-12T10:00:00.000Z')
+        }]);
     });
 
     it('drops entries for files the latest run did not visit', async () => {
@@ -196,7 +200,7 @@ describe('openTaskUsageCache', () => {
                 locations: {}
             }),
             JSON.stringify({
-                version: 2,
+                version: 3,
                 files: { [filePath]: { size: stat.size, mtimeMs: stat.mtimeMs, scan: { entries: [['x', 'NaN', 0, 0, 0]], agentIds: [], invocations: [], firstTimestampMs: null } } },
                 locations: {}
             })

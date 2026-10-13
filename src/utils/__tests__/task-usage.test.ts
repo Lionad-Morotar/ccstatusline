@@ -41,10 +41,11 @@ function usageLine(id: string, total: number, timestamp = '2026-10-12T10:00:00.0
     };
 }
 
-function runnerCall(id: string, slug: string, timestamp = '2026-10-12T10:00:00.000Z'): Record<string, unknown> {
+function runnerCommandLine(id: string, command: string, timestamp: string, cwd?: string): Record<string, unknown> {
     return {
         type: 'assistant',
         timestamp,
+        ...(cwd === undefined ? {} : { cwd }),
         requestId: `req_${id}`,
         message: {
             id,
@@ -53,11 +54,23 @@ function runnerCall(id: string, slug: string, timestamp = '2026-10-12T10:00:00.0
                 type: 'tool_use',
                 id: `call_${id}`,
                 name: 'Bash',
-                input: { command: `node ~/.claude/skills/flow-agent/scripts/run-external-review.ts --slug ${slug} --caller-model glm-5.3`, run_in_background: true }
+                input: { command, run_in_background: true }
             }],
             usage: { input_tokens: 1, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
         }
     };
+}
+
+function runnerCall(id: string, slug: string, timestamp = '2026-10-12T10:00:00.000Z'): Record<string, unknown> {
+    return runnerCommandLine(id, `node ~/.claude/skills/flow-agent/scripts/run-external-review.ts --slug ${slug} --caller-model glm-5.3`, timestamp);
+}
+
+function writeRunnerResult(reviewDir: string, fileName: string, sessionIds: string[]): void {
+    fs.mkdirSync(reviewDir, { recursive: true });
+    fs.writeFileSync(path.join(reviewDir, fileName), JSON.stringify({
+        slug: 'whatever',
+        reviews: sessionIds.map(sessionId => ({ target_model: 'glm-5.3-flash', status: 'success', session_id: sessionId }))
+    }));
 }
 
 function writeRunSessions(slug: string, files: Record<string, string[]>): void {
@@ -265,6 +278,54 @@ describe('getTaskUsageMetrics', () => {
         expect(result.main.totalTokens).toBe(102);
         expect(result.external.totalTokens).toBe(0);
         expect(result.total.totalTokens).toBe(102);
+    });
+
+    it('recovers a review whose session file a later run under the same slug overwrote', async () => {
+        const reviewDir = path.join(path.dirname(fixture.projectsRoot), 'repo', 'docs', 'reviews', 'shared');
+        const command = `node run-external-review.ts --slug 261013-j-review --review-dir ${reviewDir} --caller-model x`;
+        writeJsonl(fixture.mainPath, [
+            runnerCommandLine('m1', command, '2026-10-12T10:00:00.000Z'),
+            runnerCommandLine('m2', `${command} --tag s2`, '2026-10-12T10:30:00.000Z')
+        ]);
+        writeRunSessions('261013-j-review', { 'glm-5.3-flash': ['ext-s2'] });
+        writeRunnerResult(reviewDir, 'runner-result.json', ['ext-s1']);
+        writeRunnerResult(reviewDir, 'runner-result-2.json', ['ext-s2']);
+        writeJsonl(sessionPath(fixture.projectDir, 'ext-s1'), [usageLine('e1', 70, '2026-10-12T10:00:10.000Z')]);
+        writeJsonl(sessionPath(fixture.projectDir, 'ext-s2'), [usageLine('e2', 30, '2026-10-12T10:30:10.000Z')]);
+
+        const result = await metrics();
+
+        expect(result.external.totalTokens).toBe(100);
+        expect(result.externalSessionCount).toBe(2);
+    });
+
+    it('finds review sessions through a review folder given relative to the working directory', async () => {
+        const repoDir = path.join(path.dirname(fixture.projectsRoot), 'repo');
+        writeJsonl(fixture.mainPath, [
+            runnerCommandLine('m1', 'node run-external-review.ts --slug "$SLUG" --review-dir "$PWD/docs/reviews/k" --caller-model x', '2026-10-12T10:00:00.000Z', repoDir)
+        ]);
+        writeRunnerResult(path.join(repoDir, 'docs', 'reviews', 'k'), 'runner-result.json', ['ext-k']);
+        writeJsonl(sessionPath(fixture.projectDir, 'ext-k'), [usageLine('e1', 40, '2026-10-12T10:00:10.000Z')]);
+
+        const result = await metrics();
+
+        expect(result.external.totalTokens).toBe(40);
+    });
+
+    it('ignores sessions a reused review folder recorded for an earlier task', async () => {
+        const reviewDir = path.join(path.dirname(fixture.projectsRoot), 'repo', 'docs', 'reviews', 'reused');
+        writeJsonl(fixture.mainPath, [
+            runnerCommandLine('m1', `node run-external-review.ts --review-dir ${reviewDir} --caller-model x`, '2026-10-12T10:00:00.000Z')
+        ]);
+        writeRunnerResult(reviewDir, 'runner-result.json', ['ext-old']);
+        writeRunnerResult(reviewDir, 'runner-result-2.json', ['ext-new']);
+        writeJsonl(sessionPath(fixture.projectDir, 'ext-old'), [usageLine('e1', 500, '2026-10-11T10:00:00.000Z')]);
+        writeJsonl(sessionPath(fixture.projectDir, 'ext-new'), [usageLine('e2', 9, '2026-10-12T10:00:10.000Z')]);
+
+        const result = await metrics();
+
+        expect(result.external.totalTokens).toBe(9);
+        expect(result.externalSessionCount).toBe(1);
     });
 
     it('reports zero usage when the main transcript is missing', async () => {
