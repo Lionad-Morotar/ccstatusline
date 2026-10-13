@@ -19,6 +19,7 @@ import {
     parseUsageTokens,
     type UsageTokens
 } from './context-window';
+import { collectAgentIds } from './jsonl-agent-ids';
 import {
     iterateJsonlLines,
     parseJsonlLine
@@ -230,28 +231,6 @@ function finishTokenMetrics(state: TokenMetricState): TokenMetrics {
         totalTokens: state.metrics.inputTokens + state.metrics.outputTokens + cachedTokens,
         contextLength
     };
-}
-
-function collectAgentIds(value: unknown, agentIds: Set<string>) {
-    if (!value || typeof value !== 'object') {
-        return;
-    }
-
-    if (Array.isArray(value)) {
-        for (const item of value) {
-            collectAgentIds(item, agentIds);
-        }
-        return;
-    }
-
-    for (const [key, nestedValue] of Object.entries(value)) {
-        if (key === 'agentId' && typeof nestedValue === 'string' && nestedValue.trim() !== '') {
-            agentIds.add(nestedValue);
-            continue;
-        }
-
-        collectAgentIds(nestedValue, agentIds);
-    }
 }
 
 function parseTimestampMs(value: string | undefined): number | null {
