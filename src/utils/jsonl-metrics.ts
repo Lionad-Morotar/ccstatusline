@@ -1,5 +1,4 @@
 import * as fs from 'fs';
-import path from 'node:path';
 
 import type {
     SpeedMetrics,
@@ -29,6 +28,7 @@ import {
     type ResolvedThinkingEffort
 } from './jsonl-metadata';
 import { getSessionNameFromRecord } from './jsonl-session';
+import { listSubagentTranscripts } from './subagent-transcripts';
 
 export interface SpeedMetricsCollection {
     sessionAverage: SpeedMetrics;
@@ -558,7 +558,7 @@ async function scanTranscript(transcriptPath: string, options: TranscriptScanOpt
         if (speedState) {
             const collected: CollectedSpeedMetrics[] = [speedState];
             if (referencedAgentIds) {
-                const subagentPaths = getSubagentTranscriptPaths(transcriptPath, referencedAgentIds);
+                const subagentPaths = listSubagentTranscripts(transcriptPath, referencedAgentIds);
                 const subagentMetrics = await Promise.all(subagentPaths.map(async (subagentPath) => {
                     try {
                         return await collectSpeedMetricsFromFile(subagentPath, false);
@@ -588,57 +588,6 @@ async function scanTranscript(transcriptPath: string, options: TranscriptScanOpt
     } catch {
         return emptyResult;
     }
-}
-
-function getSubagentTranscriptPaths(transcriptPath: string, referencedAgentIds: Set<string>): string[] {
-    if (referencedAgentIds.size === 0) {
-        return [];
-    }
-
-    const transcriptDir = path.dirname(transcriptPath);
-    const transcriptStem = path.parse(transcriptPath).name;
-    const candidateDirs = [
-        path.join(transcriptDir, 'subagents'),
-        path.join(transcriptDir, transcriptStem, 'subagents')
-    ];
-    const seenPaths = new Set<string>();
-    const matchedPaths: string[] = [];
-
-    for (const subagentsDir of candidateDirs) {
-        if (!fs.existsSync(subagentsDir)) {
-            continue;
-        }
-
-        try {
-            const dirEntries = fs.readdirSync(subagentsDir, { withFileTypes: true });
-            for (const entry of dirEntries) {
-                if (!entry.isFile()) {
-                    continue;
-                }
-
-                const match = /^agent-(.+)\.jsonl$/.exec(entry.name);
-                if (!match?.[1]) {
-                    continue;
-                }
-
-                if (!referencedAgentIds.has(match[1])) {
-                    continue;
-                }
-
-                const fullPath = path.join(subagentsDir, entry.name);
-                if (seenPaths.has(fullPath)) {
-                    continue;
-                }
-
-                seenPaths.add(fullPath);
-                matchedPaths.push(fullPath);
-            }
-        } catch {
-            continue;
-        }
-    }
-
-    return matchedPaths;
 }
 
 export async function getTranscriptAnalysis(

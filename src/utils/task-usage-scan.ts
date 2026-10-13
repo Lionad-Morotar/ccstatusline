@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 
-import type { TokenTotals } from '../types/TaskUsage';
+import type { TokenTotals } from '../types';
 
 import { parseUsageTokens } from './context-window';
 import { collectAgentIds } from './jsonl-agent-ids';
