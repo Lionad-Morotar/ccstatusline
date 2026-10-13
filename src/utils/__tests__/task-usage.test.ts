@@ -10,6 +10,7 @@ import {
 } from 'vitest';
 
 import { getTaskUsageMetrics } from '../task-usage';
+import { scanTranscriptUsage } from '../task-usage-scan';
 
 interface Fixture {
     projectsRoot: string;
@@ -270,5 +271,29 @@ describe('getTaskUsageMetrics', () => {
         const result = await metrics();
 
         expect(result.total.totalTokens).toBe(0);
+    });
+
+    it('uses a provided main scan instead of reading the main transcript again', async () => {
+        writeJsonl(fixture.mainPath, [usageLine('m1', 100), runnerCall('m2', '261012-a-review')]);
+        writeJsonl(subagentPath(fixture.mainPath, 'aaa111'), [usageLine('s1', 30)]);
+        writeRunSessions('261012-a-review', { 'deepseek-v4-flash': ['ext-1'] });
+        writeJsonl(sessionPath(fixture.projectDir, 'ext-1'), [usageLine('e1', 400, '2026-10-12T10:00:10.000Z')]);
+        const mainScan = await scanTranscriptUsage(fixture.mainPath);
+        const scannedPaths: string[] = [];
+
+        const result = await getTaskUsageMetrics(fixture.mainPath, mainScan, {
+            projectsRoot: fixture.projectsRoot,
+            flowDevHome: fixture.flowDevHome,
+            scanFile: (filePath) => {
+                scannedPaths.push(filePath);
+                return scanTranscriptUsage(filePath);
+            }
+        });
+
+        expect(scannedPaths).not.toContain(fixture.mainPath);
+        expect(result).toEqual(await metrics());
+        expect(result.main.totalTokens).toBe(101);
+        expect(result.subagents.totalTokens).toBe(30);
+        expect(result.external.totalTokens).toBe(400);
     });
 });

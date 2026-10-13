@@ -35,6 +35,7 @@ import {
     getWidgetSpeedWindowSeconds,
     isWidgetSpeedWindowEnabled
 } from './utils/speed-window';
+import { getCachedTaskUsageMetrics } from './utils/task-usage-cache';
 import {
     getPackageVersion,
     getTerminalWidth
@@ -109,6 +110,7 @@ async function renderMultipleLines(data: StatusJSON) {
     const hasCompactionWidget = lines.some(line => line.some(item => item.type === 'compaction-counter'));
     const hasThinkingEffortWidget = lines.some(line => line.some(item => item.type === 'thinking-effort'));
     const hasSessionNameWidget = lines.some(line => line.some(item => item.type === 'session-name'));
+    const hasTaskTokensWidget = lines.some(line => line.some(item => item.type === 'task-tokens-total'));
     const needsTranscriptThinkingEffort = hasThinkingEffortWidget
         && (!data.effort || !('level' in data.effort));
     const requestedSpeedWindows = new Set<number>();
@@ -128,11 +130,19 @@ async function renderMultipleLines(data: StatusJSON) {
             speedWindowSeconds: Array.from(requestedSpeedWindows),
             includeCompactionStats: hasCompactionWidget,
             includeThinkingEffort: needsTranscriptThinkingEffort,
-            includeSessionName: hasSessionNameWidget
+            includeSessionName: hasSessionNameWidget,
+            includeTaskUsageScan: hasTaskTokensWidget
         })
         : Promise.resolve(null);
-    const [transcriptAnalysis, usageData, claudeStatusData] = await Promise.all([
+    const transcriptPath = data.transcript_path;
+    const taskUsagePromise = hasTaskTokensWidget && transcriptPath
+        ? transcriptAnalysisPromise
+            .then(analysis => getCachedTaskUsageMetrics(transcriptPath, analysis?.taskUsageScan ?? undefined))
+            .catch(() => null)
+        : Promise.resolve(null);
+    const [transcriptAnalysis, taskUsageMetrics, usageData, claudeStatusData] = await Promise.all([
         transcriptAnalysisPromise,
+        taskUsagePromise,
         prefetchUsageDataIfNeeded(lines, data),
         prefetchClaudeStatusIfNeeded(lines)
     ]);
@@ -155,6 +165,7 @@ async function renderMultipleLines(data: StatusJSON) {
     const context: RenderContext = {
         data,
         tokenMetrics,
+        taskUsageMetrics,
         speedMetrics,
         windowedSpeedMetrics,
         usageData,

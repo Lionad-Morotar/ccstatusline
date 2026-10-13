@@ -29,6 +29,12 @@ import {
 } from './jsonl-metadata';
 import { getSessionNameFromRecord } from './jsonl-session';
 import { listSubagentTranscripts } from './subagent-transcripts';
+import {
+    collectTranscriptUsageRecord,
+    createTranscriptUsageCollector,
+    finishTranscriptUsageCollector,
+    type TranscriptUsageScan
+} from './task-usage-scan';
 
 export interface SpeedMetricsCollection {
     sessionAverage: SpeedMetrics;
@@ -43,6 +49,8 @@ export interface TranscriptAnalysisOptions {
     includeCompactionStats?: boolean;
     includeThinkingEffort?: boolean;
     includeSessionName?: boolean;
+    /** Also collect the input the task usage graph needs from this transcript. */
+    includeTaskUsageScan?: boolean;
 }
 
 export interface TranscriptAnalysis {
@@ -52,6 +60,7 @@ export interface TranscriptAnalysis {
     compactionData: CompactionData | null;
     thinkingEffort: ResolvedThinkingEffort | undefined;
     sessionName: string | null;
+    taskUsageScan: TranscriptUsageScan | null;
 }
 
 interface TranscriptScanOptions extends TranscriptAnalysisOptions { includeTokenMetrics?: boolean }
@@ -63,6 +72,7 @@ interface TranscriptScanResult {
     compactionData: CompactionData | null;
     thinkingEffort: ResolvedThinkingEffort | undefined;
     sessionName: string | null;
+    taskUsageScan: TranscriptUsageScan | null;
 }
 
 interface SpeedInterval {
@@ -497,7 +507,8 @@ function createEmptyScanResult(options: TranscriptScanOptions, speedWindows: num
             : null,
         compactionData: options.includeCompactionStats ? createCompactionStats() : null,
         thinkingEffort: undefined,
-        sessionName: null
+        sessionName: null,
+        taskUsageScan: null
     };
 }
 
@@ -511,6 +522,7 @@ async function scanTranscript(transcriptPath: string, options: TranscriptScanOpt
     const tokenState = options.includeTokenMetrics ? createTokenMetricState() : null;
     const speedState = options.includeSpeedMetrics ? createSpeedMetricCollector() : null;
     const compactionData = options.includeCompactionStats ? createCompactionStats() : null;
+    const taskUsageCollector = options.includeTaskUsageScan ? createTranscriptUsageCollector() : null;
     const referencedAgentIds = options.includeSpeedMetrics && options.includeSubagents
         ? new Set<string>()
         : null;
@@ -542,6 +554,9 @@ async function scanTranscript(transcriptPath: string, options: TranscriptScanOpt
             }
             if (compactionData) {
                 accumulateCompactionStats(compactionData, data);
+            }
+            if (taskUsageCollector) {
+                collectTranscriptUsageRecord(taskUsageCollector, data);
             }
             if (options.includeThinkingEffort) {
                 const update = getThinkingEffortUpdate(data);
@@ -583,7 +598,8 @@ async function scanTranscript(transcriptPath: string, options: TranscriptScanOpt
             speedMetricsCollection,
             compactionData,
             thinkingEffort,
-            sessionName
+            sessionName,
+            taskUsageScan: taskUsageCollector ? finishTranscriptUsageCollector(taskUsageCollector) : null
         };
     } catch {
         return emptyResult;
@@ -605,6 +621,7 @@ export async function getTranscriptAnalysis(
         speedMetricsCollection: result.speedMetricsCollection,
         compactionData: result.compactionData,
         thinkingEffort: result.thinkingEffort,
-        sessionName: result.sessionName
+        sessionName: result.sessionName,
+        taskUsageScan: result.taskUsageScan
     };
 }
