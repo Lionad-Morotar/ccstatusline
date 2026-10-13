@@ -1,5 +1,4 @@
 import * as fs from 'fs';
-import path from 'node:path';
 
 import type {
     SpeedMetrics,
@@ -19,6 +18,7 @@ import {
     parseUsageTokens,
     type UsageTokens
 } from './context-window';
+import { collectAgentIds } from './jsonl-agent-ids';
 import {
     iterateJsonlLines,
     parseJsonlLine
@@ -28,6 +28,13 @@ import {
     type ResolvedThinkingEffort
 } from './jsonl-metadata';
 import { getSessionNameFromRecord } from './jsonl-session';
+import { listSubagentTranscripts } from './subagent-transcripts';
+import {
+    collectTranscriptUsageRecord,
+    createTranscriptUsageCollector,
+    finishTranscriptUsageCollector,
+    type TranscriptUsageScan
+} from './task-usage-scan';
 
 export interface SpeedMetricsCollection {
     sessionAverage: SpeedMetrics;
@@ -42,6 +49,8 @@ export interface TranscriptAnalysisOptions {
     includeCompactionStats?: boolean;
     includeThinkingEffort?: boolean;
     includeSessionName?: boolean;
+    /** Also collect the input the task usage graph needs from this transcript. */
+    includeTaskUsageScan?: boolean;
 }
 
 export interface TranscriptAnalysis {
@@ -51,6 +60,7 @@ export interface TranscriptAnalysis {
     compactionData: CompactionData | null;
     thinkingEffort: ResolvedThinkingEffort | undefined;
     sessionName: string | null;
+    taskUsageScan: TranscriptUsageScan | null;
 }
 
 interface TranscriptScanOptions extends TranscriptAnalysisOptions { includeTokenMetrics?: boolean }
@@ -62,6 +72,7 @@ interface TranscriptScanResult {
     compactionData: CompactionData | null;
     thinkingEffort: ResolvedThinkingEffort | undefined;
     sessionName: string | null;
+    taskUsageScan: TranscriptUsageScan | null;
 }
 
 interface SpeedInterval {
@@ -230,28 +241,6 @@ function finishTokenMetrics(state: TokenMetricState): TokenMetrics {
         totalTokens: state.metrics.inputTokens + state.metrics.outputTokens + cachedTokens,
         contextLength
     };
-}
-
-function collectAgentIds(value: unknown, agentIds: Set<string>) {
-    if (!value || typeof value !== 'object') {
-        return;
-    }
-
-    if (Array.isArray(value)) {
-        for (const item of value) {
-            collectAgentIds(item, agentIds);
-        }
-        return;
-    }
-
-    for (const [key, nestedValue] of Object.entries(value)) {
-        if (key === 'agentId' && typeof nestedValue === 'string' && nestedValue.trim() !== '') {
-            agentIds.add(nestedValue);
-            continue;
-        }
-
-        collectAgentIds(nestedValue, agentIds);
-    }
 }
 
 function parseTimestampMs(value: string | undefined): number | null {
@@ -518,7 +507,8 @@ function createEmptyScanResult(options: TranscriptScanOptions, speedWindows: num
             : null,
         compactionData: options.includeCompactionStats ? createCompactionStats() : null,
         thinkingEffort: undefined,
-        sessionName: null
+        sessionName: null,
+        taskUsageScan: null
     };
 }
 
@@ -532,6 +522,7 @@ async function scanTranscript(transcriptPath: string, options: TranscriptScanOpt
     const tokenState = options.includeTokenMetrics ? createTokenMetricState() : null;
     const speedState = options.includeSpeedMetrics ? createSpeedMetricCollector() : null;
     const compactionData = options.includeCompactionStats ? createCompactionStats() : null;
+    const taskUsageCollector = options.includeTaskUsageScan ? createTranscriptUsageCollector() : null;
     const referencedAgentIds = options.includeSpeedMetrics && options.includeSubagents
         ? new Set<string>()
         : null;
@@ -564,6 +555,9 @@ async function scanTranscript(transcriptPath: string, options: TranscriptScanOpt
             if (compactionData) {
                 accumulateCompactionStats(compactionData, data);
             }
+            if (taskUsageCollector) {
+                collectTranscriptUsageRecord(taskUsageCollector, data);
+            }
             if (options.includeThinkingEffort) {
                 const update = getThinkingEffortUpdate(data);
                 if (update) {
@@ -579,7 +573,7 @@ async function scanTranscript(transcriptPath: string, options: TranscriptScanOpt
         if (speedState) {
             const collected: CollectedSpeedMetrics[] = [speedState];
             if (referencedAgentIds) {
-                const subagentPaths = getSubagentTranscriptPaths(transcriptPath, referencedAgentIds);
+                const subagentPaths = listSubagentTranscripts(transcriptPath, referencedAgentIds);
                 const subagentMetrics = await Promise.all(subagentPaths.map(async (subagentPath) => {
                     try {
                         return await collectSpeedMetricsFromFile(subagentPath, false);
@@ -604,62 +598,12 @@ async function scanTranscript(transcriptPath: string, options: TranscriptScanOpt
             speedMetricsCollection,
             compactionData,
             thinkingEffort,
-            sessionName
+            sessionName,
+            taskUsageScan: taskUsageCollector ? finishTranscriptUsageCollector(taskUsageCollector) : null
         };
     } catch {
         return emptyResult;
     }
-}
-
-function getSubagentTranscriptPaths(transcriptPath: string, referencedAgentIds: Set<string>): string[] {
-    if (referencedAgentIds.size === 0) {
-        return [];
-    }
-
-    const transcriptDir = path.dirname(transcriptPath);
-    const transcriptStem = path.parse(transcriptPath).name;
-    const candidateDirs = [
-        path.join(transcriptDir, 'subagents'),
-        path.join(transcriptDir, transcriptStem, 'subagents')
-    ];
-    const seenPaths = new Set<string>();
-    const matchedPaths: string[] = [];
-
-    for (const subagentsDir of candidateDirs) {
-        if (!fs.existsSync(subagentsDir)) {
-            continue;
-        }
-
-        try {
-            const dirEntries = fs.readdirSync(subagentsDir, { withFileTypes: true });
-            for (const entry of dirEntries) {
-                if (!entry.isFile()) {
-                    continue;
-                }
-
-                const match = /^agent-(.+)\.jsonl$/.exec(entry.name);
-                if (!match?.[1]) {
-                    continue;
-                }
-
-                if (!referencedAgentIds.has(match[1])) {
-                    continue;
-                }
-
-                const fullPath = path.join(subagentsDir, entry.name);
-                if (seenPaths.has(fullPath)) {
-                    continue;
-                }
-
-                seenPaths.add(fullPath);
-                matchedPaths.push(fullPath);
-            }
-        } catch {
-            continue;
-        }
-    }
-
-    return matchedPaths;
 }
 
 export async function getTranscriptAnalysis(
@@ -677,6 +621,7 @@ export async function getTranscriptAnalysis(
         speedMetricsCollection: result.speedMetricsCollection,
         compactionData: result.compactionData,
         thinkingEffort: result.thinkingEffort,
-        sessionName: result.sessionName
+        sessionName: result.sessionName,
+        taskUsageScan: result.taskUsageScan
     };
 }

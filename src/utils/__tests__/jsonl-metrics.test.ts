@@ -122,6 +122,36 @@ describe('jsonl transcript metrics', () => {
         }
     });
 
+    it('collects the task usage scan in the same pass only when asked', async () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ccstatusline-jsonl-metrics-'));
+        tempRoots.push(root);
+        const transcriptPath = path.join(root, 'task.jsonl');
+        // Claude Code writes each content block of a response on its own line,
+        // repeating the response's usage on every one of them.
+        const responseLine = (content: unknown) => JSON.stringify({
+            type: 'assistant',
+            timestamp: '2026-10-12T10:00:00.000Z',
+            requestId: 'req_1',
+            message: {
+                id: 'msg_1',
+                stop_reason: 'tool_use',
+                content: [content],
+                usage: { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
+            }
+        });
+        fs.writeFileSync(transcriptPath, [
+            responseLine({ type: 'text', text: 'Launching the review.' }),
+            responseLine({ type: 'tool_use', id: 'call_1', name: 'Bash', input: { command: 'node run-external-review.ts --slug my-review' } })
+        ].join('\n'));
+
+        const withScan = await getTranscriptAnalysis(transcriptPath, { includeTaskUsageScan: true });
+        expect(withScan.taskUsageScan?.usageEntries).toHaveLength(1);
+        expect(withScan.taskUsageScan?.flowAgentInvocations.map(invocation => invocation.slug)).toEqual(['my-review']);
+
+        const withoutScan = await getTranscriptAnalysis(transcriptPath);
+        expect(withoutScan.taskUsageScan).toBeNull();
+    });
+
     it('clamps malformed usage counts the way the live status path does', async () => {
         const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ccstatusline-jsonl-metrics-'));
         tempRoots.push(root);
@@ -782,7 +812,8 @@ describe('jsonl transcript metrics', () => {
                 tokensReclaimed: 5
             },
             thinkingEffort: { value: 'high', known: true },
-            sessionName: 'Combined Session'
+            sessionName: 'Combined Session',
+            taskUsageScan: null
         });
     });
 

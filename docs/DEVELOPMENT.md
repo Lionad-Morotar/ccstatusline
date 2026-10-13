@@ -54,6 +54,7 @@ bun run docs
 - `~/.cache/ccstatusline/git-cache/git-*.json` - persistent git widget command cache
 - `~/.cache/ccstatusline/git-review/git-review-*.json` - cached Git PR/MR lookup results
 - `~/.cache/ccstatusline/custom-command-cache/cmd-*.json` - opt-in custom command results, grouped by working directory and keyed by command, timeout, session ID, and terminal width
+- `~/.cache/ccstatusline/task-usage/<hash>.json` - per-main-transcript scans of subagent and external review transcripts (reused while size and mtime are unchanged; reads that stop on an error are not stored) plus located external session paths, keyed by a hash of the main transcript path; each save deletes sibling `.json` / `.json.tmp` files untouched for 14 days
 - `~/.cache/ccstatusline/terminal-width.json` - per-session no-width probe results; detected numeric widths are not persisted by the renderer
 - `~/.cache/ccstatusline/usage.json` and `~/.cache/ccstatusline/usage.lock` - usage API data cache and fetch backoff lock
 - `~/.cache/ccstatusline/claude-status.json` and `~/.cache/ccstatusline/claude-status.lock` - Claude service-status cache and failed-fetch backoff lock
@@ -75,6 +76,7 @@ Usage-lock deadlines more than 24 hours ahead are treated as poisoned and ignore
 ## Widget Data Sources
 
 - **Transcript-backed widgets** stream the active JSONL transcript once per render through `getTranscriptAnalysis()`, collecting token, duration, speed, compaction, thinking-effort, and session-name data in one pass without materializing the whole file. Referenced subagent transcripts are streamed separately only when speed metrics include subagents.
+- **Task Tokens Total** adds a task-usage collector to that same pass when the widget is configured, then walks subagent and flow-agent external review transcripts through `getCachedTaskUsageMetrics()`. Their scans are reused from `~/.cache/ccstatusline/task-usage` while size and mtime are unchanged, so a repaint only rescans transcripts that grew.
 - **Block Timer** caches a detected block until its five-hour window expires. When a full scan finds no active block, that empty result is cached for one minute so subsequent repaints do not repeatedly walk and read the entire transcript history.
 - **Cache Timer** reads the transcript tail directly on every render. It expands the read backward when a trailing JSONL record exceeds the initial window, ignores sidechain and synthetic API-error rows, and anchors the countdown only on assistant requests with cache activity. It does not create a separate cache file.
 - **Claude Status** reads `status.claude.com` through HTTPS, honors `HTTPS_PROXY`, and caches successful responses for five minutes. It requests incident data only when at least one configured Claude Status widget enables history, applies a 30-second backoff after failed fetches, and serves a usable stale cache when available.

@@ -1,6 +1,7 @@
 import type {
     BlockMetrics,
-    SkillsMetrics
+    SkillsMetrics,
+    TaskUsageMetrics
 } from '../types';
 
 import type { SpeedMetrics } from './SpeedMetrics';
@@ -45,6 +46,7 @@ export interface CompactionData {
 export interface RenderContext {
     data?: StatusJSON;
     tokenMetrics?: TokenMetrics | null;
+    taskUsageMetrics?: TaskUsageMetrics | null;
     speedMetrics?: SpeedMetrics | null;
     windowedSpeedMetrics?: Record<string, SpeedMetrics> | null;
     usageData?: RenderUsageData | null;
