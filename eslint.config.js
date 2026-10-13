@@ -140,6 +140,8 @@ export default ts.config([
         ignores: [
             '**/dist/',
             '**/node_modules/',
+            // git-ignored review artifacts, including reviewers' throwaway probe scripts
+            'docs/reviews/',
             '**/*.js',
             '!eslint.config.js'
         ]
