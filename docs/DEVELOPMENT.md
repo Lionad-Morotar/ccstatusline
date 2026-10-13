@@ -54,6 +54,7 @@ bun run docs
 - `~/.cache/ccstatusline/git-cache/git-*.json` - persistent git widget command cache
 - `~/.cache/ccstatusline/git-review/git-review-*.json` - cached Git PR/MR lookup results
 - `~/.cache/ccstatusline/custom-command-cache/cmd-*.json` - opt-in custom command results, grouped by working directory and keyed by command, timeout, session ID, and terminal width
+- `~/.cache/ccstatusline/task-usage/<hash>.json` - per-main-transcript scans of subagent and external review transcripts (reused while size and mtime are unchanged; reads that stop on an error are not stored) plus located external session paths, keyed by a hash of the main transcript path; each save deletes sibling `.json` / `.json.tmp` files untouched for 14 days
 - `~/.cache/ccstatusline/terminal-width.json` - per-session no-width probe results; detected numeric widths are not persisted by the renderer
 - `~/.cache/ccstatusline/usage.json` and `~/.cache/ccstatusline/usage.lock` - usage API data cache and fetch backoff lock
 - `~/.cache/ccstatusline/claude-status.json` and `~/.cache/ccstatusline/claude-status.lock` - Claude service-status cache and failed-fetch backoff lock

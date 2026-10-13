@@ -23,8 +23,13 @@ export interface TaskUsageOptions {
     projectsRoot?: string;
     /** flow-dev state root; defaults to `$FLOW_DEV_HOME`, then `~/.flow-dev`. */
     flowDevHome?: string;
-    /** Scanner for every transcript other than the main one. */
+    /** Scanner for every transcript the caller did not already scan. */
     scanFile?: (filePath: string) => Promise<TranscriptUsageScan>;
+    /**
+     * Resolves an external session id to its transcript; `search` runs the
+     * default lookup, so a cache can skip it for ids it has seen before.
+     */
+    locateSessionTranscript?: (sessionId: string, search: () => string | null) => string | null;
 }
 
 interface TranscriptNode {
@@ -154,6 +159,7 @@ export async function getTaskUsageMetrics(
     const projectsRoot = options.projectsRoot ?? path.dirname(path.dirname(mainTranscriptPath));
     const flowDevHome = options.flowDevHome ?? getFlowDevHome();
     const scanFile = options.scanFile ?? scanTranscriptUsage;
+    const locateSession = options.locateSessionTranscript ?? ((_sessionId: string, search: () => string | null) => search());
 
     const totals: Record<UsageCategory, TokenTotals> = {
         main: createEmptyTokenTotals(),
@@ -204,7 +210,11 @@ export async function getTaskUsageMetrics(
 
         for (const [slug, window] of groupInvocationWindows(scan.flowAgentInvocations)) {
             for (const sessionId of readRunSessionIds(flowDevHome, slug)) {
-                const externalPath = locateSessionTranscript(projectsRoot, [node.projectDir], sessionId);
+                const preferredDir = node.projectDir;
+                const externalPath = locateSession(
+                    sessionId,
+                    () => locateSessionTranscript(projectsRoot, [preferredDir], sessionId)
+                );
                 if (!externalPath) {
                     continue;
                 }

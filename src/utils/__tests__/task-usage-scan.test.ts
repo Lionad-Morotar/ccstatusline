@@ -13,6 +13,7 @@ import {
     createTranscriptUsageCollector,
     extractFlowAgentSlugs,
     finishTranscriptUsageCollector,
+    readTranscriptUsage,
     scanTranscriptUsage,
     sumUsageEntries
 } from '../task-usage-scan';
@@ -229,5 +230,24 @@ describe('scanTranscriptUsage', () => {
             flowAgentInvocations: [],
             firstTimestampMs: null
         });
+    });
+
+    it('reports whether the whole transcript was read', async () => {
+        const transcript = writeTranscript([assistantLine({ id: 'msg_1', input: 3, output: 4 })]);
+
+        expect((await readTranscriptUsage(transcript)).complete).toBe(true);
+        expect((await readTranscriptUsage(path.join(os.tmpdir(), 'does-not-exist-task-usage.jsonl'))).complete).toBe(false);
+    });
+
+    it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)('flags a transcript that could not be read as incomplete', async () => {
+        const transcript = writeTranscript([assistantLine({ id: 'msg_1', input: 3, output: 4 })]);
+        fs.chmodSync(transcript, 0o000);
+        try {
+            const read = await readTranscriptUsage(transcript);
+            expect(read.complete).toBe(false);
+            expect(read.scan.usageEntries).toEqual([]);
+        } finally {
+            fs.chmodSync(transcript, 0o600);
+        }
     });
 });

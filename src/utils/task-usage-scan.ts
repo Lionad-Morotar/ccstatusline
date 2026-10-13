@@ -177,28 +177,41 @@ export function finishTranscriptUsageCollector(collector: TranscriptUsageCollect
     };
 }
 
+export interface TranscriptUsageRead {
+    scan: TranscriptUsageScan;
+    /** False when the file was missing or reading stopped on an error. */
+    complete: boolean;
+}
+
 /**
- * Streams one transcript into a {@link TranscriptUsageScan}.
+ * Streams one transcript into a {@link TranscriptUsageScan}, reporting
+ * whether the whole file was read.
  *
  * @remarks
  * A missing file yields an empty scan; a read error mid-file keeps whatever
  * was collected before it, so a partially readable transcript still counts.
  */
-export async function scanTranscriptUsage(filePath: string): Promise<TranscriptUsageScan> {
+export async function readTranscriptUsage(filePath: string): Promise<TranscriptUsageRead> {
     const collector = createTranscriptUsageCollector();
     if (!fs.existsSync(filePath)) {
-        return finishTranscriptUsageCollector(collector);
+        return { scan: finishTranscriptUsageCollector(collector), complete: false };
     }
 
+    let complete = true;
     try {
         for await (const line of iterateJsonlLines(filePath)) {
             collectTranscriptUsageRecord(collector, parseJsonlLine(line));
         }
     } catch {
-        // Keep the records read before the failure.
+        complete = false;
     }
 
-    return finishTranscriptUsageCollector(collector);
+    return { scan: finishTranscriptUsageCollector(collector), complete };
+}
+
+/** {@link readTranscriptUsage} without the completeness flag. */
+export async function scanTranscriptUsage(filePath: string): Promise<TranscriptUsageScan> {
+    return (await readTranscriptUsage(filePath)).scan;
 }
 
 export function createEmptyTokenTotals(): TokenTotals {
