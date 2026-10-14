@@ -12,7 +12,9 @@ import {
     collectTranscriptUsageRecord,
     createTranscriptUsageCollector,
     extractFlowAgentLaunches,
+    extractWorkflowRunDirs,
     finishTranscriptUsageCollector,
+    readFirstUserPrompt,
     readTranscriptUsage,
     scanTranscriptUsage,
     sumUsageEntries
@@ -117,6 +119,54 @@ describe('extractFlowAgentLaunches', () => {
         expect(reviewDirOf('node run-external-review.ts --slug s --review-dir \'$PWD/docs\'')).toBeNull();
         expect(reviewDirOf('node run-external-review.ts --slug s --review-dir "$DIR/docs"')).toBeNull();
     });
+
+    it('resolves variables assigned earlier in the same command', () => {
+        expect(slugsOf('K=261013-x; node run-external-review.ts --slug $K-review --caller-model x')).toEqual(['261013-x-review']);
+        expect(slugsOf('export SLUG="261013-y"\nnode run-external-review.ts --slug "${SLUG}" --caller-model x')).toEqual(['261013-y']);
+        expect(slugsOf('node run-external-review.ts --slug $K --caller-model x; K=late')).toEqual([]);
+        expect(slugsOf('K=$(date +%s); node run-external-review.ts --slug $K --caller-model x')).toEqual([]);
+    });
+});
+
+describe('extractWorkflowRunDirs', () => {
+    const runDir = path.join(os.homedir(), '.flow-workflow', 'huashu-report', 'run', '261014', 'a');
+
+    it('reads the run folder of a derive-worker call through an earlier assignment', () => {
+        const command = `RUN=${runDir}\n`
+            + 'bash ~/.claude/skills/flow-workflow/scripts/run-ts.sh ~/.claude/skills/flow-workflow/scripts/derive-worker.ts '
+            + 'launch "$RUN/brief.json" --run-dir "$RUN" --launcher "cg->cq" --cwd "$RUN"';
+        expect(extractWorkflowRunDirs(command)).toEqual([runDir]);
+    });
+
+    it('expands ~ in an unquoted assignment and resolves relative folders against the working directory', () => {
+        const cwd = path.join(os.tmpdir(), 'repo');
+        expect(extractWorkflowRunDirs('RUN=~/.flow-workflow/huashu-report/run/261014/a; derive-worker.ts status --run-dir $RUN')).toEqual([runDir]);
+        expect(extractWorkflowRunDirs('derive-worker.ts launch doc.md --run-dir run/a', cwd)).toEqual([path.join(cwd, 'run/a')]);
+    });
+
+    it('ignores calls without a resolvable run folder', () => {
+        expect(extractWorkflowRunDirs('derive-worker.ts --help')).toEqual([]);
+        expect(extractWorkflowRunDirs('derive-worker.ts launch doc.md --run-dir "$RUN"')).toEqual([]);
+        expect(extractWorkflowRunDirs('node other.ts --run-dir /tmp/run')).toEqual([]);
+    });
+});
+
+describe('readFirstUserPrompt', () => {
+    it('returns the text of the first user message', () => {
+        const transcript = writeTranscript([
+            '{not json',
+            { type: 'queue-operation', operation: 'enqueue' },
+            { type: 'user', message: { role: 'user', content: [{ type: 'text', text: 'write /tmp/run/worker-001.report.md' }] } },
+            { type: 'user', message: { role: 'user', content: 'later' } }
+        ]);
+
+        expect(readFirstUserPrompt(transcript)).toBe('write /tmp/run/worker-001.report.md');
+    });
+
+    it('returns null for a missing transcript or one without a user message', () => {
+        expect(readFirstUserPrompt(path.join(os.tmpdir(), 'does-not-exist-task-usage.jsonl'))).toBeNull();
+        expect(readFirstUserPrompt(writeTranscript([assistantLine({ input: 1, output: 1 })]))).toBeNull();
+    });
 });
 
 describe('scanTranscriptUsage', () => {
@@ -208,6 +258,25 @@ describe('scanTranscriptUsage', () => {
         expect(scan.firstTimestampMs).toBe(Date.parse('2026-10-12T09:59:00.000Z'));
     });
 
+    it('records workflow worker calls with the time they were issued', async () => {
+        const transcript = writeTranscript([
+            assistantLine({
+                id: 'msg_1',
+                timestamp: '2026-10-12T10:00:00.000Z',
+                input: 1,
+                output: 1,
+                content: bashToolUse('RUN=/tmp/run/a; derive-worker.ts launch "$RUN/brief.json" --run-dir "$RUN"'),
+                stopReason: 'tool_use'
+            })
+        ]);
+
+        const scan = await scanTranscriptUsage(transcript);
+
+        expect(scan.workflowLaunches).toEqual([
+            { runDir: path.normalize('/tmp/run/a'), timestampMs: Date.parse('2026-10-12T10:00:00.000Z') }
+        ]);
+    });
+
     it('collects the subagent ids referenced by tool results', async () => {
         const transcript = writeTranscript([
             { type: 'user', timestamp: '2026-10-12T10:00:00.000Z', toolUseResult: { agentId: 'a1b2c3', status: 'completed' } }
@@ -247,6 +316,7 @@ describe('scanTranscriptUsage', () => {
             usageEntries: [],
             agentIds: [],
             flowAgentInvocations: [],
+            workflowLaunches: [],
             firstTimestampMs: null
         });
     });

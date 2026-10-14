@@ -52,7 +52,7 @@ function runnerCall(id: string, slug: string): Record<string, unknown> {
                 type: 'tool_use',
                 id: `call_${id}`,
                 name: 'Bash',
-                input: { command: `node run-external-review.ts --slug ${slug} --review-dir /tmp/reviews/${slug}` }
+                input: { command: `node run-external-review.ts --slug ${slug} --review-dir /tmp/reviews/${slug}; derive-worker.ts status --run-dir /tmp/run/${slug}` }
             }],
             usage: { input_tokens: 1, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
         }
@@ -143,6 +143,10 @@ describe('openTaskUsageCache', () => {
             reviewDir: path.normalize('/tmp/reviews/my-slug'),
             timestampMs: Date.parse('2026-10-12T10:00:00.000Z')
         }]);
+        expect(cached.workflowLaunches).toEqual([{
+            runDir: path.normalize('/tmp/run/my-slug'),
+            timestampMs: Date.parse('2026-10-12T10:00:00.000Z')
+        }]);
     });
 
     it('drops entries for files the latest run did not visit', async () => {
@@ -201,7 +205,17 @@ describe('openTaskUsageCache', () => {
             }),
             JSON.stringify({
                 version: 3,
-                files: { [filePath]: { size: stat.size, mtimeMs: stat.mtimeMs, scan: { entries: [['x', 'NaN', 0, 0, 0]], agentIds: [], invocations: [], firstTimestampMs: null } } },
+                files: { [filePath]: { size: stat.size, mtimeMs: stat.mtimeMs, scan: { entries: [['x', 99, 0, 0, 0]], agentIds: [], invocations: [], firstTimestampMs: null } } },
+                locations: {}
+            }),
+            JSON.stringify({
+                version: 4,
+                files: { [filePath]: { size: stat.size, mtimeMs: stat.mtimeMs, scan: { entries: [['x', 'NaN', 0, 0, 0]], agentIds: [], invocations: [], workflowLaunches: [], firstTimestampMs: null } } },
+                locations: {}
+            }),
+            JSON.stringify({
+                version: 4,
+                files: { [filePath]: { size: stat.size, mtimeMs: stat.mtimeMs, scan: { entries: [['x', 99, 0, 0, 0]], agentIds: [], invocations: [], workflowLaunches: [[7, null]], firstTimestampMs: null } } },
                 locations: {}
             })
         ]) {

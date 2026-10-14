@@ -14,21 +14,24 @@ import {
     scanTranscriptUsage,
     type FlowAgentInvocation,
     type TranscriptUsageScan,
-    type UsageEntry
+    type UsageEntry,
+    type WorkflowLaunch
 } from './task-usage-scan';
 
-const CACHE_VERSION = 3;
+const CACHE_VERSION = 4;
 // Cache files belong to one main transcript each; once that session has been
 // idle this long nobody repaints it, so the file is only taking disk space.
 const STALE_CACHE_FILE_MS = 14 * 24 * 60 * 60 * 1000;
 
 type StoredUsageEntry = [string | null, number, number, number, number];
 type StoredInvocation = [string | null, string | null, number | null];
+type StoredWorkflowLaunch = [string, number | null];
 
 interface StoredScan {
     entries: StoredUsageEntry[];
     agentIds: string[];
     invocations: StoredInvocation[];
+    workflowLaunches: StoredWorkflowLaunch[];
     firstTimestampMs: number | null;
 }
 
@@ -82,6 +85,13 @@ function isStoredInvocation(value: unknown): value is StoredInvocation {
         && (value[2] === null || isFiniteNumber(value[2]));
 }
 
+function isStoredWorkflowLaunch(value: unknown): value is StoredWorkflowLaunch {
+    return Array.isArray(value)
+        && value.length === 2
+        && typeof value[0] === 'string'
+        && (value[1] === null || isFiniteNumber(value[1]));
+}
+
 function isStoredFile(value: unknown): value is StoredFile {
     if (!value || typeof value !== 'object') {
         return false;
@@ -94,6 +104,7 @@ function isStoredFile(value: unknown): value is StoredFile {
         && Array.isArray(scan.entries) && scan.entries.every(isStoredUsageEntry)
         && Array.isArray(scan.agentIds) && scan.agentIds.every(id => typeof id === 'string')
         && Array.isArray(scan.invocations) && scan.invocations.every(isStoredInvocation)
+        && Array.isArray(scan.workflowLaunches) && scan.workflowLaunches.every(isStoredWorkflowLaunch)
         && (scan.firstTimestampMs === null || isFiniteNumber(scan.firstTimestampMs));
 }
 
@@ -152,6 +163,7 @@ function toStoredScan(scan: TranscriptUsageScan): StoredScan {
         ]),
         agentIds: scan.agentIds,
         invocations: scan.flowAgentInvocations.map(invocation => [invocation.slug, invocation.reviewDir, invocation.timestampMs]),
+        workflowLaunches: scan.workflowLaunches.map(launch => [launch.runDir, launch.timestampMs]),
         firstTimestampMs: scan.firstTimestampMs
     };
 }
@@ -170,6 +182,10 @@ function fromStoredScan(stored: StoredScan): TranscriptUsageScan {
             slug: invocation[0],
             reviewDir: invocation[1],
             timestampMs: invocation[2]
+        })),
+        workflowLaunches: stored.workflowLaunches.map((launch): WorkflowLaunch => ({
+            runDir: launch[0],
+            timestampMs: launch[1]
         })),
         firstTimestampMs: stored.firstTimestampMs
     };

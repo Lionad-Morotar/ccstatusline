@@ -38,11 +38,23 @@ export interface FlowAgentLaunch {
 /** A flow-agent launch found in a tool call, with the time it was issued. */
 export interface FlowAgentInvocation extends FlowAgentLaunch { timestampMs: number | null }
 
+/**
+ * A flow-workflow `derive-worker` call found in a tool call.
+ *
+ * @remarks
+ * `runDir` holds one `worker-NNN.meta.json` per worker the run dispatched.
+ */
+export interface WorkflowLaunch {
+    runDir: string;
+    timestampMs: number | null;
+}
+
 /** Everything the task-usage graph needs from one transcript file. */
 export interface TranscriptUsageScan {
     usageEntries: UsageEntry[];
     agentIds: string[];
     flowAgentInvocations: FlowAgentInvocation[];
+    workflowLaunches: WorkflowLaunch[];
     firstTimestampMs: number | null;
 }
 
@@ -51,24 +63,34 @@ export interface TranscriptUsageCollector {
     anonymousEntries: UsageEntry[];
     agentIds: Set<string>;
     flowAgentInvocations: FlowAgentInvocation[];
+    workflowLaunches: WorkflowLaunch[];
     firstTimestampMs: number | null;
     /** Latest compaction still waiting for the summary it produced. */
     pendingCompaction: UsageEntry | null;
 }
 
 const RUNNER_PATTERN = /run-external-review(?:\.[cm]?[jt]s)?\b/g;
-// A runner invocation ends at the next unescaped newline or shell separator,
-// so a `--slug` belonging to a later command is never attributed to it.
+const WORKFLOW_WORKER_PATTERN = /derive-worker(?:\.[cm]?[jt]s)?\b/g;
+// An invocation ends at the next unescaped newline or shell separator, so an
+// argument belonging to a later command is never attributed to it.
 const COMMAND_END_PATTERN = /(?<!\\)\n|;|&&|\|/;
 const SLUG_ARGUMENT_PATTERN = /--slug(?:=|\s+)(?:"([^"]*)"|'([^']*)'|([^\s;&|]+))/;
 const REVIEW_DIR_ARGUMENT_PATTERN = /--review-dir(?:=|\s+)(?:"([^"]*)"|'([^']*)'|([^\s;&|]+))/;
+const RUN_DIR_ARGUMENT_PATTERN = /--run-dir(?:=|\s+)(?:"([^"]*)"|'([^']*)'|([^\s;&|]+))/;
+const ASSIGNMENT_PATTERN = /(?:^|[\n;&|(]|\bexport)[ \t]*([A-Za-z_]\w*)=(?:"([^"]*)"|'([^']*)'|([^\s;&|)]*))/g;
+const VARIABLE_PATTERN = /\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))/g;
 const VALID_SLUG_PATTERN = /^[\w.-]+$/;
-const PWD_PREFIX_PATTERN = /^\$(?:PWD|\{PWD\})(?=[/\\]|$)/;
 
 interface ShellArgument {
     value: string;
     singleQuoted: boolean;
     unquoted: boolean;
+}
+
+interface ShellContext {
+    cwd: string | null;
+    /** Variables assigned earlier in the same command. */
+    variables: Map<string, string>;
 }
 
 function readShellArgument(pattern: RegExp, invocation: string): ShellArgument | null {
@@ -83,55 +105,121 @@ function readShellArgument(pattern: RegExp, invocation: string): ShellArgument |
     return { value, singleQuoted: match[2] !== undefined, unquoted: match[3] !== undefined };
 }
 
-// Mirrors what the shell would have passed: `$PWD` is the command's working
-// directory unless single-quoted, `~` expands only unquoted, and anything else
-// that still needs the shell to expand cannot be resolved afterwards.
-function resolveReviewDir(argument: ShellArgument, cwd: string | null): string | null {
-    let value = argument.value;
-    const pwdPrefix = argument.singleQuoted ? null : PWD_PREFIX_PATTERN.exec(value);
-    if (pwdPrefix) {
-        if (cwd === null) {
+function lookupVariable(name: string, context: ShellContext): string | null {
+    if (name === 'PWD') {
+        return context.cwd;
+    }
+    return context.variables.get(name) ?? (name === 'HOME' ? os.homedir() : null);
+}
+
+function expandVariables(value: string, context: ShellContext): string | null {
+    for (const match of value.matchAll(VARIABLE_PATTERN)) {
+        if (lookupVariable(match[1] ?? match[2] ?? '', context) === null) {
             return null;
         }
-        value = cwd + value.slice(pwdPrefix[0].length);
-    } else if (argument.unquoted && (value === '~' || value.startsWith('~/'))) {
+    }
+    const expanded = value.replace(
+        VARIABLE_PATTERN,
+        (_match, braced: string | undefined, bare: string | undefined) => lookupVariable(braced ?? bare ?? '', context) ?? ''
+    );
+    return /[$`]/.test(expanded) ? null : expanded;
+}
+
+// Only plain `NAME=value` assignments are followed; a value built from a
+// command substitution or an unknown variable leaves the name unresolved.
+function readShellAssignments(commandPrefix: string, cwd: string | null): Map<string, string> {
+    const variables = new Map<string, string>();
+    for (const match of commandPrefix.matchAll(ASSIGNMENT_PATTERN)) {
+        const name = match[1] ?? '';
+        const singleQuoted = match[3];
+        const unquoted = match[4];
+        const value = singleQuoted ?? (unquoted === undefined
+            ? expandVariables(match[2] ?? '', { cwd, variables })
+            : resolveShellValue({ value: unquoted, singleQuoted: false, unquoted: true }, { cwd, variables }));
+        if (value === null || /[$`]/.test(value)) {
+            variables.delete(name);
+        } else {
+            variables.set(name, value);
+        }
+    }
+    return variables;
+}
+
+// Mirrors what the shell would have passed: variables expand unless
+// single-quoted, `~` expands only unquoted, and anything the shell would still
+// have had to evaluate cannot be resolved afterwards.
+function resolveShellValue(argument: ShellArgument, context: ShellContext): string | null {
+    if (argument.singleQuoted) {
+        return /[$`]/.test(argument.value) ? null : argument.value;
+    }
+    let value = argument.value;
+    if (argument.unquoted && (value === '~' || value.startsWith('~/'))) {
         value = path.join(os.homedir(), value.slice(1));
     }
-    if (/[$`]/.test(value)) {
+    return expandVariables(value, context);
+}
+
+function resolveShellPath(argument: ShellArgument, context: ShellContext): string | null {
+    const value = resolveShellValue(argument, context);
+    if (value === null) {
         return null;
     }
     if (path.isAbsolute(value)) {
         return path.normalize(value);
     }
-    return cwd === null ? null : path.resolve(cwd, value);
+    return context.cwd === null ? null : path.resolve(context.cwd, value);
+}
+
+function* iterateInvocations(command: string, pattern: RegExp, cwd: string | null): Generator<{ invocation: string; context: ShellContext }> {
+    for (const match of command.matchAll(pattern)) {
+        const rest = command.slice(match.index + match[0].length);
+        const end = COMMAND_END_PATTERN.exec(rest);
+        yield {
+            invocation: end ? rest.slice(0, end.index) : rest,
+            context: { cwd, variables: readShellAssignments(command.slice(0, match.index), cwd) }
+        };
+    }
 }
 
 /**
  * Returns every flow-agent runner launch in a shell command.
  *
  * @remarks
- * Arguments that only the shell could expand (variables other than `$PWD`,
- * substitutions) are dropped; a launch with neither a usable slug nor a usable
- * review folder is skipped.
+ * Arguments are expanded with `$PWD`, `$HOME` and variables assigned earlier
+ * in the same command; anything else only the shell could expand is dropped,
+ * and a launch with neither a usable slug nor a usable review folder is skipped.
  *
  * @param cwd - Working directory the command ran in, for `$PWD` and relative paths
  */
 export function extractFlowAgentLaunches(command: string, cwd: string | null = null): FlowAgentLaunch[] {
     const launches: FlowAgentLaunch[] = [];
-    for (const match of command.matchAll(RUNNER_PATTERN)) {
-        const rest = command.slice(match.index + match[0].length);
-        const end = COMMAND_END_PATTERN.exec(rest);
-        const invocation = end ? rest.slice(0, end.index) : rest;
-
+    for (const { invocation, context } of iterateInvocations(command, RUNNER_PATTERN, cwd)) {
         const slugArgument = readShellArgument(SLUG_ARGUMENT_PATTERN, invocation);
-        const slug = slugArgument && VALID_SLUG_PATTERN.test(slugArgument.value) ? slugArgument.value : null;
+        const slugValue = slugArgument ? resolveShellValue(slugArgument, context) : null;
+        const slug = slugValue !== null && VALID_SLUG_PATTERN.test(slugValue) ? slugValue : null;
         const reviewDirArgument = readShellArgument(REVIEW_DIR_ARGUMENT_PATTERN, invocation);
-        const reviewDir = reviewDirArgument ? resolveReviewDir(reviewDirArgument, cwd) : null;
+        const reviewDir = reviewDirArgument ? resolveShellPath(reviewDirArgument, context) : null;
         if (slug !== null || reviewDir !== null) {
             launches.push({ slug, reviewDir });
         }
     }
     return launches;
+}
+
+/**
+ * Returns the `--run-dir` of every flow-workflow `derive-worker` call in a
+ * shell command, resolved the same way as {@link extractFlowAgentLaunches}.
+ */
+export function extractWorkflowRunDirs(command: string, cwd: string | null = null): string[] {
+    const runDirs: string[] = [];
+    for (const { invocation, context } of iterateInvocations(command, WORKFLOW_WORKER_PATTERN, cwd)) {
+        const runDirArgument = readShellArgument(RUN_DIR_ARGUMENT_PATTERN, invocation);
+        const runDir = runDirArgument ? resolveShellPath(runDirArgument, context) : null;
+        if (runDir !== null) {
+            runDirs.push(runDir);
+        }
+    }
+    return runDirs;
 }
 
 /**
@@ -189,6 +277,7 @@ export function createTranscriptUsageCollector(): TranscriptUsageCollector {
         anonymousEntries: [],
         agentIds: new Set(),
         flowAgentInvocations: [],
+        workflowLaunches: [],
         firstTimestampMs: null,
         pendingCompaction: null
     };
@@ -282,6 +371,9 @@ export function collectTranscriptUsageRecord(collector: TranscriptUsageCollector
             for (const launch of extractFlowAgentLaunches(command, cwd)) {
                 collector.flowAgentInvocations.push({ ...launch, timestampMs });
             }
+            for (const runDir of extractWorkflowRunDirs(command, cwd)) {
+                collector.workflowLaunches.push({ runDir, timestampMs });
+            }
         }
     }
 
@@ -308,8 +400,44 @@ export function finishTranscriptUsageCollector(collector: TranscriptUsageCollect
         usageEntries: [...collector.keyedEntries.values(), ...collector.anonymousEntries].map(entry => ({ ...entry })),
         agentIds: Array.from(collector.agentIds),
         flowAgentInvocations: collector.flowAgentInvocations.slice(),
+        workflowLaunches: collector.workflowLaunches.slice(),
         firstTimestampMs: collector.firstTimestampMs
     };
+}
+
+const FIRST_PROMPT_READ_LIMIT_BYTES = 256 * 1024;
+
+/**
+ * Returns the text of a transcript's first user message, the prompt a
+ * headless session was started with.
+ *
+ * @remarks
+ * Reads at most the head of the file; null when no user message starts there.
+ */
+export function readFirstUserPrompt(filePath: string): string | null {
+    let head: string;
+    try {
+        const fd = fs.openSync(filePath, 'r');
+        try {
+            const buffer = Buffer.alloc(Math.min(FIRST_PROMPT_READ_LIMIT_BYTES, fs.fstatSync(fd).size));
+            const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, 0);
+            head = buffer.subarray(0, bytesRead).toString('utf-8');
+        } finally {
+            fs.closeSync(fd);
+        }
+    } catch {
+        return null;
+    }
+
+    for (const line of head.split('\n')) {
+        const record = asRecord(parseJsonlLine(line));
+        if (record?.type !== 'user') {
+            continue;
+        }
+        const message = asRecord(record.message);
+        return message ? getMessageText(message.content) : null;
+    }
+    return null;
 }
 
 export interface TranscriptUsageRead {

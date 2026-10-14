@@ -11,9 +11,11 @@ import { listSubagentTranscripts } from './subagent-transcripts';
 import {
     addUsageEntry,
     createEmptyTokenTotals,
+    readFirstUserPrompt,
     scanTranscriptUsage,
     type FlowAgentInvocation,
-    type TranscriptUsageScan
+    type TranscriptUsageScan,
+    type WorkflowLaunch
 } from './task-usage-scan';
 
 type UsageCategory = 'main' | 'subagents' | 'external';
@@ -51,6 +53,12 @@ interface SessionSource {
     window: InvocationWindow;
 }
 
+/** A flow-workflow worker, as recorded in its `worker-NNN.meta.json`. */
+interface WorkflowWorker {
+    cwd: string;
+    reportPath: string;
+}
+
 // The runner probes launchers before the review session writes its first
 // record, and a fallback chain can run several models back to back, so the
 // accepted start window is generous on the late side.
@@ -59,6 +67,7 @@ const EXTERNAL_SESSION_TRAIL_MS = 6 * 60 * 60 * 1000;
 const SESSION_ID_PATTERN = /^[\w-]+$/;
 const SESSION_FILE_PATTERN = /^review-.+\.session$/;
 const RUNNER_RESULT_PATTERN = /^runner-result(?:-\d+)?\.json$/;
+const WORKER_META_PATTERN = /^worker-\d+\.meta\.json$/;
 export function getFlowDevHome(): string {
     return process.env.FLOW_DEV_HOME ?? path.join(os.homedir(), '.flow-dev');
 }
@@ -153,11 +162,7 @@ function collectSessionSources(invocations: FlowAgentInvocation[], flowDevHome: 
             source = { readSessionIds, window: { startMs: null, endMs: null } };
             sources.set(key, source);
         }
-        if (timestampMs !== null) {
-            const { window } = source;
-            window.startMs = window.startMs === null ? timestampMs : Math.min(window.startMs, timestampMs);
-            window.endMs = window.endMs === null ? timestampMs : Math.max(window.endMs, timestampMs);
-        }
+        widenWindow(source.window, timestampMs);
     };
 
     for (const { slug, reviewDir, timestampMs } of invocations) {
@@ -169,6 +174,79 @@ function collectSessionSources(invocations: FlowAgentInvocation[], flowDevHome: 
         }
     }
     return Array.from(sources.values());
+}
+
+function widenWindow(window: InvocationWindow, timestampMs: number | null): void {
+    if (timestampMs !== null) {
+        window.startMs = window.startMs === null ? timestampMs : Math.min(window.startMs, timestampMs);
+        window.endMs = window.endMs === null ? timestampMs : Math.max(window.endMs, timestampMs);
+    }
+}
+
+function groupWorkflowWindows(launches: WorkflowLaunch[]): Map<string, InvocationWindow> {
+    const windows = new Map<string, InvocationWindow>();
+    for (const { runDir, timestampMs } of launches) {
+        const window = windows.get(runDir) ?? { startMs: null, endMs: null };
+        widenWindow(window, timestampMs);
+        windows.set(runDir, window);
+    }
+    return windows;
+}
+
+/** Claude Code's `projects` folder name for a working directory. */
+export function getProjectDirName(cwd: string): string {
+    return cwd.replace(/[^a-zA-Z0-9]/g, '-');
+}
+
+function readWorkflowWorkers(runDir: string): WorkflowWorker[] {
+    const workers: WorkflowWorker[] = [];
+    for (const name of readDirNames(runDir)) {
+        if (!WORKER_META_PATTERN.test(name)) {
+            continue;
+        }
+        let meta: { cwd?: unknown; reportPath?: unknown } | null;
+        try {
+            meta = JSON.parse(fs.readFileSync(path.join(runDir, name), 'utf-8')) as { cwd?: unknown; reportPath?: unknown } | null;
+        } catch {
+            continue;
+        }
+        if (typeof meta?.cwd === 'string' && path.isAbsolute(meta.cwd)
+            && typeof meta.reportPath === 'string' && meta.reportPath !== '') {
+            workers.push({ cwd: meta.cwd, reportPath: meta.reportPath });
+        }
+    }
+    return workers;
+}
+
+// A worker records no session id, but it runs headless in its `cwd` with the
+// derived prompt as its first message, and that prompt always names the
+// worker's report file. Files untouched since before the launch window cannot
+// be one of its sessions, which keeps the prompt reads to recent transcripts.
+function findWorkerTranscripts(projectsRoot: string, worker: WorkflowWorker, window: InvocationWindow): string[] {
+    const projectDir = path.join(projectsRoot, getProjectDirName(worker.cwd));
+    const activeSinceMs = window.startMs === null ? null : window.startMs - EXTERNAL_SESSION_LEAD_MS;
+    const matches: string[] = [];
+    for (const name of readDirNames(projectDir)) {
+        if (!name.endsWith('.jsonl')) {
+            continue;
+        }
+        const filePath = path.join(projectDir, name);
+        if (activeSinceMs !== null) {
+            let mtimeMs: number;
+            try {
+                mtimeMs = fs.statSync(filePath).mtimeMs;
+            } catch {
+                continue;
+            }
+            if (mtimeMs < activeSinceMs) {
+                continue;
+            }
+        }
+        if (readFirstUserPrompt(filePath)?.includes(worker.reportPath)) {
+            matches.push(filePath);
+        }
+    }
+    return matches;
 }
 
 function startedWithinWindow(firstTimestampMs: number | null, window: InvocationWindow): boolean {
@@ -191,10 +269,11 @@ function resolveVisitKey(filePath: string): string {
  * Sums token usage across the task rooted at a main transcript.
  *
  * @remarks
- * Walks the main session, every subagent transcript, and every external
- * review session that a `run-external-review` call in any of those
- * transcripts recorded under `<flowDevHome>/runs/<slug>/review-*.session` or
- * in `<review-dir>/runner-result*.json`.
+ * Walks the main session, every subagent transcript, every external review
+ * session that a `run-external-review` call in any of those transcripts
+ * recorded under `<flowDevHome>/runs/<slug>/review-*.session` or in
+ * `<review-dir>/runner-result*.json`, and every flow-workflow worker session
+ * dispatched into a `--run-dir` that a `derive-worker` call named.
  * Usage is de-duplicated across all files by API response, so a resumed
  * review that copies earlier history into a forked transcript adds nothing.
  * Compactions count as estimated requests, since none carries recorded usage.
@@ -258,6 +337,25 @@ export async function getTaskUsageMetrics(
             });
         }
 
+        const addExternalSession = async (externalPath: string, window: InvocationWindow): Promise<void> => {
+            const visitKey = resolveVisitKey(externalPath);
+            if (visited.has(visitKey)) {
+                return;
+            }
+            const externalScan = await scanFile(externalPath);
+            if (!startedWithinWindow(externalScan.firstTimestampMs, window)) {
+                return;
+            }
+            visited.add(visitKey);
+            externalSessionCount += 1;
+            queue.push({
+                filePath: externalPath,
+                category: 'external',
+                projectDir: path.dirname(externalPath),
+                scan: externalScan
+            });
+        };
+
         for (const { readSessionIds, window } of collectSessionSources(scan.flowAgentInvocations, flowDevHome)) {
             for (const sessionId of readSessionIds()) {
                 const preferredDir = node.projectDir;
@@ -265,25 +363,17 @@ export async function getTaskUsageMetrics(
                     sessionId,
                     () => locateSessionTranscript(projectsRoot, [preferredDir], sessionId)
                 );
-                if (!externalPath) {
-                    continue;
+                if (externalPath) {
+                    await addExternalSession(externalPath, window);
                 }
-                const visitKey = resolveVisitKey(externalPath);
-                if (visited.has(visitKey)) {
-                    continue;
+            }
+        }
+
+        for (const [runDir, window] of groupWorkflowWindows(scan.workflowLaunches)) {
+            for (const worker of readWorkflowWorkers(runDir)) {
+                for (const workerPath of findWorkerTranscripts(projectsRoot, worker, window)) {
+                    await addExternalSession(workerPath, window);
                 }
-                const externalScan = await scanFile(externalPath);
-                if (!startedWithinWindow(externalScan.firstTimestampMs, window)) {
-                    continue;
-                }
-                visited.add(visitKey);
-                externalSessionCount += 1;
-                queue.push({
-                    filePath: externalPath,
-                    category: 'external',
-                    projectDir: path.dirname(externalPath),
-                    scan: externalScan
-                });
             }
         }
     }

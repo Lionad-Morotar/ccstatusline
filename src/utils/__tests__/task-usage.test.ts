@@ -9,7 +9,10 @@ import {
     it
 } from 'vitest';
 
-import { getTaskUsageMetrics } from '../task-usage';
+import {
+    getProjectDirName,
+    getTaskUsageMetrics
+} from '../task-usage';
 import { scanTranscriptUsage } from '../task-usage-scan';
 
 interface Fixture {
@@ -79,6 +82,28 @@ function writeRunSessions(slug: string, files: Record<string, string[]>): void {
     for (const [model, ids] of Object.entries(files)) {
         fs.writeFileSync(path.join(runDir, `review-${model}.session`), `${ids.join('\n')}\n`);
     }
+}
+
+function workerReportPath(runDir: string, worker: string): string {
+    return path.join(runDir, `worker-${worker}.report.md`);
+}
+
+function writeWorkflowWorker(runDir: string, worker: string, cwd: string): void {
+    fs.mkdirSync(runDir, { recursive: true });
+    fs.writeFileSync(path.join(runDir, `worker-${worker}.meta.json`), JSON.stringify({
+        worker,
+        reportPath: workerReportPath(runDir, worker),
+        launcher: 'cg',
+        cwd
+    }));
+}
+
+function workerPrompt(runDir: string, worker: string, timestamp = '2026-10-12T10:00:05.000Z'): Record<string, unknown> {
+    return {
+        type: 'user',
+        timestamp,
+        message: { role: 'user', content: `Do the research. Write the report to ${workerReportPath(runDir, worker)}.` }
+    };
 }
 
 function sessionPath(projectDir: string, sessionId: string): string {
@@ -326,6 +351,50 @@ describe('getTaskUsageMetrics', () => {
 
         expect(result.external.totalTokens).toBe(9);
         expect(result.externalSessionCount).toBe(1);
+    });
+
+    it('adds the sessions of flow-workflow workers dispatched into a run folder', async () => {
+        const runDir = path.join(path.dirname(fixture.projectsRoot), '.flow-workflow', 'report', 'run', '261014', 'a');
+        writeJsonl(fixture.mainPath, [
+            usageLine('m1', 100),
+            runnerCommandLine('m2', `RUN=${runDir}\nderive-worker.ts launch "$RUN/brief.json" --run-dir "$RUN" --cwd "$RUN"`, '2026-10-12T10:00:00.000Z')
+        ]);
+        writeWorkflowWorker(runDir, '001', runDir);
+        writeWorkflowWorker(runDir, '002', runDir);
+        const workerDir = path.join(fixture.projectsRoot, getProjectDirName(runDir));
+        writeJsonl(path.join(workerDir, 'w1.jsonl'), [workerPrompt(runDir, '001'), usageLine('w1', 300, '2026-10-12T10:00:20.000Z')]);
+        writeJsonl(path.join(workerDir, 'w2.jsonl'), [workerPrompt(runDir, '002'), usageLine('w2', 200, '2026-10-12T10:05:00.000Z')]);
+        writeJsonl(subagentPath(path.join(workerDir, 'w2.jsonl'), 'bbb222'), [usageLine('w2s', 7, '2026-10-12T10:06:00.000Z')]);
+        writeJsonl(path.join(workerDir, 'other.jsonl'), [
+            { type: 'user', timestamp: '2026-10-12T10:00:10.000Z', message: { content: 'unrelated work in the same folder' } },
+            usageLine('o1', 999, '2026-10-12T10:00:30.000Z')
+        ]);
+
+        const result = await metrics();
+
+        expect(result.main.totalTokens).toBe(101);
+        expect(result.external.totalTokens).toBe(507);
+        expect(result.externalSessionCount).toBe(2);
+        expect(result.subagentTranscriptCount).toBe(0);
+    });
+
+    it('ignores worker sessions from before the workflow calls of this task', async () => {
+        const runDir = path.join(path.dirname(fixture.projectsRoot), '.flow-workflow', 'report', 'run', '261014', 'b');
+        writeJsonl(fixture.mainPath, [
+            runnerCommandLine('m1', `derive-worker.ts status --run-dir ${runDir} --worker 001`, '2026-10-12T10:00:00.000Z')
+        ]);
+        writeWorkflowWorker(runDir, '001', runDir);
+        const workerDir = path.join(fixture.projectsRoot, getProjectDirName(runDir));
+        writeJsonl(path.join(workerDir, 'early.jsonl'), [workerPrompt(runDir, '001', '2026-10-11T10:00:00.000Z'), usageLine('w1', 300, '2026-10-11T10:00:20.000Z')]);
+        const stalePath = path.join(workerDir, 'stale.jsonl');
+        writeJsonl(stalePath, [workerPrompt(runDir, '001'), usageLine('w2', 200, '2026-10-12T10:00:20.000Z')]);
+        const staleTime = new Date('2026-10-11T10:00:00.000Z');
+        fs.utimesSync(stalePath, staleTime, staleTime);
+
+        const result = await metrics();
+
+        expect(result.external.totalTokens).toBe(0);
+        expect(result.externalSessionCount).toBe(0);
     });
 
     it('reports zero usage when the main transcript is missing', async () => {
